@@ -94,9 +94,14 @@ fn spawn_refresh(cache: &Path) {
     // A per-process temp keeps concurrent runs from clobbering each other's write.
     let tmp = dir.join(format!("brew-outdated.{}.tmp", std::process::id()));
     // `HOMEBREW_NO_AUTO_UPDATE=1` keeps this local-only (no network, no hang).
+    //
+    // IMPORTANT: `brew outdated` exits *non-zero* when something IS outdated —
+    // exactly the case we care about. So we must not gate the move on its exit
+    // code (`&& mv`), or the notice would never be written. Instead: always run
+    // the query, then move iff it produced output (`[ -s tmp ]`).
     let script = format!(
-        "HOMEBREW_NO_AUTO_UPDATE=1 brew outdated --json=v2 {formula} > {tmp} 2>/dev/null \
-         && mv -f {tmp} {cache} || rm -f {tmp}",
+        "HOMEBREW_NO_AUTO_UPDATE=1 brew outdated --json=v2 {formula} > {tmp} 2>/dev/null; \
+         [ -s {tmp} ] && mv -f {tmp} {cache} || rm -f {tmp}",
         formula = TAP_FORMULA,
         tmp = shell_single_quote(&tmp),
         cache = shell_single_quote(cache),
