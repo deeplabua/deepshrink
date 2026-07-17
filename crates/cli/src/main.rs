@@ -131,9 +131,13 @@ fn run(cli: &Cli) -> Result<(), AppError> {
     let goal = resolve_goal(cli)?;
     let files = collect_inputs(cli)?;
 
-    if cli.output.is_some() && files.len() > 1 {
+    // A file `--output` is single-file only; a directory `--output` is fine for
+    // a batch (each result is written into it under its derived name).
+    let output_is_dir = cli.output.as_ref().is_some_and(|p| p.is_dir());
+    if cli.output.is_some() && !output_is_dir && files.len() > 1 {
         return Err(AppError::InvalidArgs(
-            "--output can only be used with a single input file".to_string(),
+            "--output can only target a single input file (pass a directory to write many)"
+                .to_string(),
         ));
     }
 
@@ -276,6 +280,15 @@ fn process_one(
 ) -> Result<FileResult, AppError> {
     let info = engine.probe(input).map_err(map_engine_error)?;
     let mut plan = engine.plan(&info, opts).map_err(map_engine_error)?;
+
+    // `--output <dir>`: place the engine-derived filename inside the directory
+    // (opts.output was cleared for a directory, so plan.output is the natural
+    // `<stem>.shrink.<ext>` name to relocate).
+    if let Some(dir) = cli.output.as_ref().filter(|p| p.is_dir()) {
+        if let Some(name) = plan.output.file_name() {
+            plan.output = dir.join(name);
+        }
+    }
 
     if cli.dry_run {
         if cli.json {
@@ -441,7 +454,9 @@ fn build_opts(cli: &Cli, goal: SizeGoal) -> Result<ShrinkOpts, AppError> {
         sample_rate: parse_sample_rate(&cli.sample_rate)?,
         vbr: cli.vbr,
         target_vmaf: cli.vmaf,
-        output: cli.output.clone(),
+        // A directory `--output` is resolved per-file in `process_one` (the
+        // engine derives the filename); pass only an explicit file path here.
+        output: cli.output.as_ref().filter(|p| !p.is_dir()).cloned(),
     })
 }
 
@@ -548,7 +563,7 @@ fn print_outcome(info: &MediaInfo, outcome: &Outcome) {
     println!(
         "  {} {}   {}   {}{}\n",
         "✓".if_supports_color(Stdout, |t| t.green().bold().to_string()),
-        file_label(&outcome.output).if_supports_color(Stdout, |t| t.bold()),
+        format::display_path(&outcome.output).if_supports_color(Stdout, |t| t.bold()),
         format::size(outcome.final_bytes),
         delta.if_supports_color(Stdout, |t| if ratio >= 0.0 {
             t.green().to_string()
