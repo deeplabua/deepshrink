@@ -131,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "deepshrink"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "deepshrink-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "deepshrink-ffmpeg",
  "thiserror",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "deepshrink-ffmpeg"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",

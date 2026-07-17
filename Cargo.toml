@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/cli", "crates/core", "crates/ffmpeg"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/deeplabua/deepshrink"
@@ -20,30 +20,36 @@ indicatif = "0.17"
 owo-colors = { version = "4", features = ["supports-colors"] }
 
 # Internal workspace crates (version enables publishing to crates.io).
-deepshrink-core = { path = "crates/core", version = "0.1.0" }
-deepshrink-ffmpeg = { path = "crates/ffmpeg", version = "0.1.0" }
+deepshrink-core = { path = "crates/core", version = "0.2.0" }
+deepshrink-ffmpeg = { path = "crates/ffmpeg", version = "0.2.0" }
 
 [profile.release]
 lto = "thin"
 strip = true
 
-# cargo-dist (`dist`) configuration. Run `dist init` to (re)generate
-# `.github/workflows/release.yml` with shell/powershell installers, a Homebrew
-# formula in the tap and a Scoop manifest. Pin `cargo-dist-version` to the
-# installed `dist` when you first run it.
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+# Config for 'dist'
 [workspace.metadata.dist]
-cargo-dist-version = "0.28.0"
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
 ci = "github"
+# The installers to generate for each app
 installers = ["shell", "powershell", "homebrew"]
+# A GitHub repo to push Homebrew formulas to
 tap = "deeplabua/homebrew-tap"
+# Publish jobs to run in CI
 publish-jobs = ["homebrew"]
-targets = [
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "x86_64-unknown-linux-gnu",
-    "x86_64-pc-windows-msvc",
-]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Whether to install an updater program
 install-updater = false
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
 
 # ffmpeg is a runtime dependency; have the Homebrew formula pull it in.
 [workspace.metadata.dist.dependencies.homebrew]
