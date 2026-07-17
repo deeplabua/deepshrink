@@ -9,6 +9,7 @@
 
 mod cli;
 mod format;
+mod update;
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -17,7 +18,10 @@ use std::process::ExitCode;
 use clap::Parser;
 use deepshrink_ffmpeg::FfmpegError;
 use indicatif::{ProgressBar, ProgressStyle};
-use owo_colors::{OwoColorize, Stream::Stdout};
+use owo_colors::{
+    OwoColorize,
+    Stream::{Stderr, Stdout},
+};
 
 use deepshrink_core::engine::{media::PassKind, EncodePlan, Outcome};
 use deepshrink_core::{
@@ -41,7 +45,14 @@ mod exit {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(&cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            // Best-effort Homebrew upgrade nudge (throttled, opt-out). Only on a
+            // clean run so failure output stays uncluttered.
+            if let Some(hint) = update::upgrade_hint(cli.quiet, cli.json) {
+                eprintln!("\n{}", hint.if_supports_color(Stderr, |t| t.dimmed()));
+            }
+            ExitCode::SUCCESS
+        }
         Err(err) => {
             eprintln!(
                 "{} {}",

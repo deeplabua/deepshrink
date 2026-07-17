@@ -107,6 +107,15 @@ bitrate that fits the target (minus container overhead), then runs a **two-pass*
 for video, or picks a codec bitrate for audio. If the result overshoots the target, it
 corrects once. Run with `--dry-run` to see the plan first.
 
+## Update checks
+
+For **Homebrew** installs, DeepShrink prints a one-line hint when a newer version is
+available. It does this **without any network call of its own** — it asks your local
+Homebrew (`brew outdated`, at most once a day, in a detached background process that never
+delays your command). Nothing about your files is ever uploaded. Disable it entirely with
+`DEEPSHRINK_NO_UPDATE_CHECK=1`. (Other install methods rely on `cargo install` / the
+installer as usual.)
+
 ## Scope
 
 v0.1 handles **video and audio** (the ffmpeg engine). Images, PDF, and office files are a
