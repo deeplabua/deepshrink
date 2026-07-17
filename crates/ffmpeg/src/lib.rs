@@ -17,9 +17,11 @@ use thiserror::Error;
 pub mod probe;
 pub mod progress;
 pub mod run;
+pub mod vmaf;
 
 pub use probe::{probe, Ffprobe};
 pub use run::run_pass;
+pub use vmaf::{has_libvmaf, measure_vmaf};
 
 /// Errors from the ffmpeg layer.
 #[derive(Debug, Error)]

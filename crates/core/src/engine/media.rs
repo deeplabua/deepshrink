@@ -47,6 +47,33 @@ impl MediaEngine {
         on_progress: &mut dyn FnMut(PassKind, f64),
     ) -> Result<Outcome, EngineError> {
         let tools = deepshrink_ffmpeg::locate()?;
+
+        // VMAF-targeted quality search: applies to CRF-mode video only. Size /
+        // audio / passthrough encodes keep their existing single path.
+        if let Some(target_vmaf) = plan.target_vmaf {
+            if plan.spec.video.crf.is_some() && !plan.spec.audio_only && !plan.spec.passthrough {
+                return self.run_crf_search(&tools, plan, target_vmaf, on_progress);
+            }
+        }
+
+        let mut outcome = self.run_plain(&tools, plan, on_progress)?;
+
+        // Size-targeted video with `--vmaf`: encode to budget, then report the
+        // VMAF actually achieved (best effort — a failed measurement is silent).
+        if plan.target_vmaf.is_some() && !plan.spec.audio_only && !plan.spec.passthrough {
+            outcome.vmaf = self.measure_output(&tools, plan, &plan.output);
+        }
+        Ok(outcome)
+    }
+
+    /// The plain encode: two-pass (with one correction retry) or single-pass,
+    /// no VMAF handling. Returns an [`Outcome`] with `vmaf = None`.
+    fn run_plain(
+        &self,
+        tools: &deepshrink_ffmpeg::Tools,
+        plan: &EncodePlan,
+        on_progress: &mut dyn FnMut(PassKind, f64),
+    ) -> Result<Outcome, EngineError> {
         let passlog = passlog_base(plan);
         let total = plan.source_duration_sec;
 
@@ -89,7 +116,95 @@ impl MediaEngine {
         Ok(Outcome {
             output: plan.output.clone(),
             final_bytes: size,
+            vmaf: None,
         })
+    }
+
+    /// Search CRF for the smallest output that still meets `target_vmaf`.
+    ///
+    /// Each trial is a single-pass CRF encode into `plan.output` followed by a
+    /// VMAF measurement against the source. Drives [`budget::search_crf`], so
+    /// the search algorithm itself is unit-tested separately. Falls back to a
+    /// plain encode if the source resolution is unknown (nothing to measure).
+    fn run_crf_search(
+        &self,
+        tools: &deepshrink_ffmpeg::Tools,
+        plan: &EncodePlan,
+        target_vmaf: f64,
+        on_progress: &mut dyn FnMut(PassKind, f64),
+    ) -> Result<Outcome, EngineError> {
+        let (ref_w, ref_h) = match (plan.source_width, plan.source_height) {
+            (Some(w), Some(h)) => (w, h),
+            _ => return self.run_plain(tools, plan, on_progress),
+        };
+        let ref_fps = plan.source_fps.unwrap_or(0.0);
+        let total = plan.source_duration_sec;
+        let (lo, hi) = plan.spec.video.codec.crf_search_bounds();
+        let n_threads = thread_count();
+
+        let mut err: Option<EngineError> = None;
+        let mut last_crf: Option<u8> = None;
+
+        let (chosen_crf, chosen_vmaf) = budget::search_crf(target_vmaf, lo, hi, |crf| {
+            if err.is_some() {
+                return f64::NEG_INFINITY;
+            }
+            match encode_at_crf(tools, plan, crf, total, on_progress).and_then(|()| {
+                last_crf = Some(crf);
+                deepshrink_ffmpeg::measure_vmaf(
+                    &tools.ffmpeg,
+                    &plan.output,
+                    &plan.input,
+                    ref_w,
+                    ref_h,
+                    ref_fps,
+                    n_threads,
+                )
+                .map_err(EngineError::from)
+            }) {
+                Ok(v) => v,
+                Err(e) => {
+                    err = Some(e);
+                    f64::NEG_INFINITY
+                }
+            }
+        });
+        if let Some(e) = err {
+            return Err(e);
+        }
+
+        // Leave the chosen CRF on disk (the search may have ended elsewhere).
+        if last_crf != Some(chosen_crf) {
+            encode_at_crf(tools, plan, chosen_crf, total, on_progress)?;
+        }
+        let size = fs::metadata(&plan.output)?.len();
+        Ok(Outcome {
+            output: plan.output.clone(),
+            final_bytes: size,
+            vmaf: Some(chosen_vmaf),
+        })
+    }
+
+    /// Measure the VMAF of an encoded `output` against the plan's source.
+    /// Returns `None` on any failure or when the source dimensions are unknown.
+    fn measure_output(
+        &self,
+        tools: &deepshrink_ffmpeg::Tools,
+        plan: &EncodePlan,
+        output: &Path,
+    ) -> Option<f64> {
+        let (w, h) = (plan.source_width?, plan.source_height?);
+        let fps = plan.source_fps.unwrap_or(0.0);
+        deepshrink_ffmpeg::measure_vmaf(
+            &tools.ffmpeg,
+            output,
+            &plan.input,
+            w,
+            h,
+            fps,
+            thread_count(),
+        )
+        .ok()
     }
 
     /// Plan a pure-audio encode (single pass, codec + fitted bitrate).
@@ -160,7 +275,11 @@ impl MediaEngine {
             summary,
             expected_bytes,
             target_bytes: target,
+            target_vmaf: None,
             source_duration_sec: duration,
+            source_width: info.width,
+            source_height: info.height,
+            source_fps: info.fps,
             spec: EncodeSpec {
                 video: placeholder_video_spec(),
                 audio: Some(audio),
@@ -261,12 +380,9 @@ impl Engine for MediaEngine {
                 Some(predicted),
             )
         } else {
-            // Quality mode: CRF, no hard size guarantee.
-            let crf = match opts.quality {
-                crate::options::QualityPreset::Fast => 25,
-                crate::options::QualityPreset::Balanced => 23,
-                crate::options::QualityPreset::Max => 20,
-            };
+            // Quality mode: CRF, no hard size guarantee. The CRF default is
+            // codec-aware; a `--vmaf` target refines it via a search in `run`.
+            let crf = opts.quality.default_crf(opts.video_codec);
             let height = match opts.resolution {
                 ResolutionOpt::Height(h) => clamp_height(h, src_height),
                 ResolutionOpt::Auto => None,
@@ -293,7 +409,11 @@ impl Engine for MediaEngine {
             summary,
             expected_bytes,
             target_bytes: target,
+            target_vmaf: opts.target_vmaf,
             source_duration_sec: duration,
+            source_width: info.width,
+            source_height: info.height,
+            source_fps: info.fps,
             spec: EncodeSpec {
                 video,
                 audio,
@@ -331,7 +451,11 @@ fn passthrough_plan(info: &MediaInfo, output: PathBuf, target: u64, faststart: b
         summary: "stream copy (already within target)".to_string(),
         expected_bytes: Some(info.size_bytes),
         target_bytes: Some(target),
+        target_vmaf: None,
         source_duration_sec: info.duration_sec,
+        source_width: info.width,
+        source_height: info.height,
+        source_fps: info.fps,
         spec: EncodeSpec {
             video: placeholder_video_spec(),
             audio: None,
@@ -490,6 +614,32 @@ fn cleanup_passlog(base: &str) {
     for suffix in ["-0.log", "-0.log.mbtree"] {
         let _ = fs::remove_file(format!("{base}{suffix}"));
     }
+}
+
+/// Encode a single-pass CRF trial into `plan.output` at the given CRF.
+fn encode_at_crf(
+    tools: &deepshrink_ffmpeg::Tools,
+    plan: &EncodePlan,
+    crf: u8,
+    total: f64,
+    on_progress: &mut dyn FnMut(PassKind, f64),
+) -> Result<(), EngineError> {
+    let mut trial = plan.clone();
+    trial.spec.video.crf = Some(crf);
+    trial.spec.video.bitrate_bps = None;
+    trial.spec.two_pass = false;
+    let args = build_pass_args(&trial, PassKind::Single, "");
+    deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, total, &mut |f| {
+        on_progress(PassKind::Single, f)
+    })?;
+    Ok(())
+}
+
+/// Threads to hand libvmaf (bounded by available parallelism).
+fn thread_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
 }
 
 /// Platform null sink for the discard output of pass 1.

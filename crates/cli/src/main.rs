@@ -137,7 +137,27 @@ fn run(cli: &Cli) -> Result<(), AppError> {
         ));
     }
 
-    let opts = build_opts(cli, goal)?;
+    let mut opts = build_opts(cli, goal)?;
+
+    // `--vmaf` needs ffmpeg's libvmaf filter. If this build lacks it, degrade
+    // gracefully: warn once and drop the target so encoding still proceeds.
+    if opts.target_vmaf.is_some() {
+        let available = deepshrink_ffmpeg::locate()
+            .map(|t| deepshrink_ffmpeg::has_libvmaf(&t.ffmpeg))
+            .unwrap_or(true); // ffmpeg missing entirely surfaces later as code 3
+        if !available {
+            if !cli.quiet && !cli.json {
+                eprintln!(
+                    "  {}",
+                    "note: this ffmpeg build has no libvmaf filter — skipping VMAF \
+                     measurement (install a full ffmpeg build to enable --vmaf)"
+                        .if_supports_color(Stdout, |t| t.dimmed())
+                );
+            }
+            opts.target_vmaf = None;
+        }
+    }
+
     let engine = MediaEngine::new();
     let interactive = std::io::stdout().is_terminal();
 
@@ -311,6 +331,7 @@ fn process_one(
     let outcome = Outcome {
         output: final_dest,
         final_bytes: outcome.final_bytes,
+        vmaf: outcome.vmaf,
     };
 
     if cli.json {
@@ -419,6 +440,7 @@ fn build_opts(cli: &Cli, goal: SizeGoal) -> Result<ShrinkOpts, AppError> {
         mono: cli.mono,
         sample_rate: parse_sample_rate(&cli.sample_rate)?,
         vbr: cli.vbr,
+        target_vmaf: cli.vmaf,
         output: cli.output.clone(),
     })
 }
@@ -515,8 +537,16 @@ fn print_outcome(info: &MediaInfo, outcome: &Outcome) {
     } else {
         format!("+{:.1}%", -ratio)
     };
+    // Optional VMAF readout, e.g. "   VMAF 91.2".
+    let vmaf = match outcome.vmaf {
+        Some(v) => format!(
+            "   {}",
+            format!("VMAF {v:.1}").if_supports_color(Stdout, |t| t.cyan().to_string())
+        ),
+        None => String::new(),
+    };
     println!(
-        "  {} {}   {}   {}\n",
+        "  {} {}   {}   {}{}\n",
         "✓".if_supports_color(Stdout, |t| t.green().bold().to_string()),
         file_label(&outcome.output).if_supports_color(Stdout, |t| t.bold()),
         format::size(outcome.final_bytes),
@@ -525,6 +555,7 @@ fn print_outcome(info: &MediaInfo, outcome: &Outcome) {
         } else {
             t.yellow().to_string()
         }),
+        vmaf,
     );
 }
 
@@ -573,6 +604,7 @@ fn print_json_result(info: &MediaInfo, outcome: &Outcome) {
         "output": outcome.output.to_string_lossy(),
         "original_bytes": info.size_bytes,
         "final_bytes": outcome.final_bytes,
+        "vmaf": outcome.vmaf,
         "dry_run": false,
     });
     println!("{value}");

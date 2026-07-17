@@ -73,6 +73,18 @@ deepshrink big.mp4 --target 8MB --dry-run
 deepshrink ./clips --recursive --for telegram
 ```
 
+Target a perceptual quality instead of a size, or pick a more efficient codec:
+
+```sh
+deepshrink clip.mp4 --vmaf 93            # smallest file that still scores VMAF ≥ 93
+deepshrink clip.mp4 --codec h265         # HEVC — smaller at the same quality
+```
+
+`--vmaf` searches the encoder's quality setting (CRF) for the smallest output that meets
+your target VMAF, and reports the score it achieved. It needs an ffmpeg built with the
+`libvmaf` filter; without it, DeepShrink skips the measurement and encodes at a sensible
+default. When a size target is set, `--vmaf` reports the VMAF actually achieved.
+
 The original file is never modified — DeepShrink writes a new `*.shrink.*` file unless
 you pass `--overwrite`.
 

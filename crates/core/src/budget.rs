@@ -109,6 +109,39 @@ pub fn fit_audio_bps(target_bytes: u64, duration_sec: f64, candidates: &[u64]) -
     })
 }
 
+// --- VMAF-targeted CRF search (session 005) ---
+
+/// Find the highest CRF in `lo..=hi` (i.e. the smallest output) whose measured
+/// VMAF still meets `target`. `measure` maps a CRF to its VMAF score and is
+/// assumed monotonically non-increasing in CRF (higher CRF → lower quality).
+///
+/// Returns the chosen CRF and the VMAF it scored. If even `lo` (the best
+/// quality) can't reach `target`, returns `lo` and its score as a best effort.
+/// Runs at most `1 + ceil(log2(hi - lo + 1))` measurements via binary search.
+///
+/// This is the pure, unit-tested form of the search the engine drives with real
+/// encodes (see `engine::media::MediaEngine::run_crf_search`).
+pub fn search_crf(target: f64, lo: u8, hi: u8, mut measure: impl FnMut(u8) -> f64) -> (u8, f64) {
+    let base = measure(lo);
+    // Monotonic: if the best quality misses the target, nothing will.
+    if base < target {
+        return (lo, base);
+    }
+    let mut best = (lo, base);
+    let (mut a, mut b) = (lo as i32 + 1, hi as i32);
+    while a <= b {
+        let mid = a + (b - a) / 2;
+        let v = measure(mid as u8);
+        if v >= target {
+            best = (mid as u8, v);
+            a = mid + 1;
+        } else {
+            b = mid - 1;
+        }
+    }
+    best
+}
+
 // --- Pure-audio budgeting (session 003) ---
 
 /// Standard audio bitrate steps (bits/s, descending). We snap the raw budget
@@ -204,6 +237,36 @@ mod tests {
         assert_eq!(snap_audio_bitrate(130_000), 128_000);
         assert_eq!(snap_audio_bitrate(1_000_000), 320_000); // capped
         assert_eq!(snap_audio_bitrate(12_000), 12_000);
+    }
+
+    #[test]
+    fn search_crf_picks_highest_meeting_target() {
+        // Synthetic monotonic model: VMAF falls 1.5 points per CRF step from a
+        // reference of 100 at CRF 18.
+        let vmaf = |crf: u8| 100.0 - 1.5 * (crf as f64 - 18.0);
+        // Target 91 → highest CRF with vmaf >= 91 is 24 (vmaf 91.0).
+        let (crf, v) = search_crf(91.0, 18, 32, vmaf);
+        assert_eq!(crf, 24);
+        assert!(v >= 91.0);
+        // The next CRF up must dip below the target (we picked the smallest file).
+        assert!(vmaf(crf + 1) < 91.0);
+    }
+
+    #[test]
+    fn search_crf_best_effort_when_unreachable() {
+        // Even the best quality (lo) can't reach the target → return lo.
+        let vmaf = |crf: u8| 80.0 - (crf as f64 - 18.0);
+        let (crf, v) = search_crf(95.0, 18, 32, vmaf);
+        assert_eq!(crf, 18);
+        assert_eq!(v, 80.0);
+    }
+
+    #[test]
+    fn search_crf_keeps_top_quality_when_all_pass() {
+        // Everything clears a very low target → the largest CRF (smallest file).
+        let vmaf = |crf: u8| 100.0 - 0.1 * (crf as f64 - 18.0);
+        let (crf, _) = search_crf(50.0, 18, 32, vmaf);
+        assert_eq!(crf, 32);
     }
 
     #[test]

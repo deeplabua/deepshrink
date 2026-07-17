@@ -36,6 +36,16 @@ impl VideoCodec {
             VideoCodec::H265 => "H.265",
         }
     }
+
+    /// Inclusive CRF range to search when targeting a VMAF score, best quality
+    /// (lowest CRF) first. x265's CRF scale is shifted ~+6 vs x264 for the same
+    /// perceptual quality, so the bounds differ per codec.
+    pub fn crf_search_bounds(self) -> (u8, u8) {
+        match self {
+            VideoCodec::H264 => (18, 32),
+            VideoCodec::H265 => (22, 36),
+        }
+    }
 }
 
 /// Audio codec choice (also used for pure-audio in session 003).
@@ -116,6 +126,24 @@ impl QualityPreset {
             QualityPreset::Fast => "veryfast",
             QualityPreset::Balanced => "medium",
             QualityPreset::Max => "slow",
+        }
+    }
+
+    /// Default quality-mode CRF for a codec. x265 needs a higher CRF than x264
+    /// for comparable quality, so the numbers are codec-specific. These defaults
+    /// aim for roughly VMAF ~93 (visually near-transparent) on typical content.
+    pub fn default_crf(self, codec: VideoCodec) -> u8 {
+        match codec {
+            VideoCodec::H264 => match self {
+                QualityPreset::Fast => 25,
+                QualityPreset::Balanced => 23,
+                QualityPreset::Max => 20,
+            },
+            VideoCodec::H265 => match self {
+                QualityPreset::Fast => 30,
+                QualityPreset::Balanced => 28,
+                QualityPreset::Max => 24,
+            },
         }
     }
 }

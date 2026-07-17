@@ -69,6 +69,9 @@ pub struct ShrinkOpts {
     pub sample_rate: Option<u32>,
     /// Prefer VBR where the codec supports it.
     pub vbr: bool,
+    /// Target VMAF: in quality mode, search CRF for the smallest output that
+    /// still scores at least this. `None` disables VMAF-aware encoding.
+    pub target_vmaf: Option<f64>,
     /// Explicit output path; when `None` the engine derives one.
     pub output: Option<PathBuf>,
 }
@@ -86,6 +89,7 @@ impl Default for ShrinkOpts {
             mono: false,
             sample_rate: None,
             vbr: false,
+            target_vmaf: None,
             output: None,
         }
     }
@@ -158,8 +162,14 @@ pub struct EncodePlan {
     pub expected_bytes: Option<u64>,
     /// The hard size cap, if any (drives the post-encode correction retry).
     pub target_bytes: Option<u64>,
+    /// Target VMAF for a CRF search, if requested (quality mode only).
+    pub target_vmaf: Option<f64>,
     /// Source duration in seconds (for progress reporting).
     pub source_duration_sec: f64,
+    /// Source resolution and frame rate — the reference for VMAF measurement.
+    pub source_width: Option<u32>,
+    pub source_height: Option<u32>,
+    pub source_fps: Option<f64>,
     pub spec: EncodeSpec,
 }
 
@@ -168,6 +178,8 @@ pub struct EncodePlan {
 pub struct Outcome {
     pub output: PathBuf,
     pub final_bytes: u64,
+    /// Measured VMAF of the result vs the source, if a measurement was taken.
+    pub vmaf: Option<f64>,
 }
 
 /// Engine errors.
