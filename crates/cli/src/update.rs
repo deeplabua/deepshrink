@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
+use owo_colors::{OwoColorize, Stream::Stderr};
+
 /// The tapped formula name used for the check and the upgrade command.
 const TAP_FORMULA: &str = "deeplabua/tap/deepshrink";
 
@@ -42,7 +44,8 @@ pub fn upgrade_hint(quiet: bool, json: bool) -> Option<String> {
     if is_stale(&cache) {
         spawn_refresh(&cache);
     }
-    parse_hint(&std::fs::read_to_string(&cache).ok()?)
+    let (installed, current) = parse_versions(&std::fs::read_to_string(&cache).ok()?)?;
+    Some(styled_hint(&installed, &current))
 }
 
 /// Whether the running binary lives inside a Homebrew Cellar.
@@ -112,9 +115,9 @@ fn shell_single_quote(p: &Path) -> String {
     format!("'{}'", p.to_string_lossy().replace('\'', r"'\''"))
 }
 
-/// Parse `brew outdated --json=v2` output into an upgrade hint, if our formula
-/// is listed as outdated. Pure — unit-tested with captured brew output.
-fn parse_hint(brew_json: &str) -> Option<String> {
+/// Extract `(installed, current)` from `brew outdated --json=v2` output when our
+/// formula is listed as outdated. Pure — unit-tested with captured brew output.
+fn parse_versions(brew_json: &str) -> Option<(String, String)> {
     let v: serde_json::Value = serde_json::from_str(brew_json).ok()?;
     let formula = v.get("formulae")?.as_array()?.iter().find(|f| {
         f.get("name")
@@ -130,10 +133,21 @@ fn parse_hint(brew_json: &str) -> Option<String> {
     if installed == current {
         return None;
     }
-    Some(format!(
-        "A new version of deepshrink is available: {installed} → {current}\n\
-         Update: brew upgrade {TAP_FORMULA}",
-    ))
+    Some((installed.to_string(), current.to_string()))
+}
+
+/// Render the two-line notice: the intro is dimmed, versions and "Update:" stay
+/// in the normal foreground, and the two things that matter are highlighted —
+/// the new version (bold green) and the upgrade command (bold cyan).
+fn styled_hint(installed: &str, current: &str) -> String {
+    let cmd = format!("brew upgrade {TAP_FORMULA}");
+    format!(
+        "{} {installed} → {}\nUpdate: {}",
+        "A new version of deepshrink is available:"
+            .if_supports_color(Stderr, |t| t.dimmed().to_string()),
+        current.if_supports_color(Stderr, |t| t.green().bold().to_string()),
+        cmd.if_supports_color(Stderr, |t| t.cyan().bold().to_string()),
+    )
 }
 
 #[cfg(test)]
@@ -153,27 +167,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_hint_when_outdated() {
+    fn parse_versions_when_outdated() {
         let json = r#"{"formulae":[{"name":"deeplabua/tap/deepshrink",
             "installed_versions":["0.2.1"],"current_version":"0.3.0"}],"casks":[]}"#;
-        let hint = parse_hint(json).expect("expected a hint");
-        assert!(hint.contains("0.2.1 → 0.3.0"), "got: {hint}");
-        assert!(hint.contains("brew upgrade deeplabua/tap/deepshrink"));
+        assert_eq!(
+            parse_versions(json),
+            Some(("0.2.1".to_string(), "0.3.0".to_string()))
+        );
     }
 
     #[test]
-    fn no_hint_when_up_to_date() {
-        assert_eq!(parse_hint(r#"{"formulae":[],"casks":[]}"#), None);
+    fn no_versions_when_up_to_date() {
+        assert_eq!(parse_versions(r#"{"formulae":[],"casks":[]}"#), None);
         // Defensive: installed already equals current.
         let json = r#"{"formulae":[{"name":"deepshrink",
             "installed_versions":["0.3.0"],"current_version":"0.3.0"}]}"#;
-        assert_eq!(parse_hint(json), None);
+        assert_eq!(parse_versions(json), None);
     }
 
     #[test]
-    fn no_hint_on_garbage() {
-        assert_eq!(parse_hint("not json"), None);
-        assert_eq!(parse_hint("{}"), None);
-        assert_eq!(parse_hint(r#"{"formulae":[]}"#), None);
+    fn no_versions_on_garbage() {
+        assert_eq!(parse_versions("not json"), None);
+        assert_eq!(parse_versions("{}"), None);
+        assert_eq!(parse_versions(r#"{"formulae":[]}"#), None);
+    }
+
+    #[test]
+    fn styled_hint_carries_versions_and_command() {
+        let hint = styled_hint("0.2.1", "0.3.0");
+        assert!(hint.contains("0.2.1"), "got: {hint}");
+        assert!(hint.contains("0.3.0"));
+        assert!(hint.contains("brew upgrade deeplabua/tap/deepshrink"));
     }
 }

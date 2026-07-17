@@ -18,10 +18,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use deepshrink_ffmpeg::FfmpegError;
 use indicatif::{ProgressBar, ProgressStyle};
-use owo_colors::{
-    OwoColorize,
-    Stream::{Stderr, Stdout},
-};
+use owo_colors::{OwoColorize, Stream::Stdout};
 
 use deepshrink_core::engine::{media::PassKind, EncodePlan, Outcome};
 use deepshrink_core::{
@@ -47,9 +44,10 @@ fn main() -> ExitCode {
     match run(&cli) {
         Ok(()) => {
             // Best-effort Homebrew upgrade nudge (throttled, opt-out). Only on a
-            // clean run so failure output stays uncluttered.
+            // clean run so failure output stays uncluttered. The hint styles
+            // itself (dim info line, emphasized command).
             if let Some(hint) = update::upgrade_hint(cli.quiet, cli.json) {
-                eprintln!("\n{}", hint.if_supports_color(Stderr, |t| t.dimmed()));
+                eprintln!("\n{hint}");
             }
             ExitCode::SUCCESS
         }
