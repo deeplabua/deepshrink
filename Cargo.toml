@@ -52,5 +52,7 @@ install-updater = false
 install-path = "CARGO_HOME"
 
 # ffmpeg is a runtime dependency; have the Homebrew formula pull it in.
+# `stage = ["run"]` is what emits `depends_on "ffmpeg"` in the formula — the
+# default stage is build-only, which would NOT install ffmpeg for users.
 [workspace.metadata.dist.dependencies.homebrew]
-ffmpeg = "*"
+ffmpeg = { version = "*", stage = ["build", "run"] }
