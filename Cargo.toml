@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = ["crates/cli", "crates/core", "crates/ffmpeg"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/deeplabua/deepshrink"
+homepage = "https://deepshrink.tools"
+rust-version = "1.82"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+indicatif = "0.17"
+owo-colors = { version = "4", features = ["supports-colors"] }
+
+# Internal workspace crates (version enables publishing to crates.io).
+deepshrink-core = { path = "crates/core", version = "0.1.0" }
+deepshrink-ffmpeg = { path = "crates/ffmpeg", version = "0.1.0" }
+
+[profile.release]
+lto = "thin"
+strip = true
+
+# cargo-dist (`dist`) configuration. Run `dist init` to (re)generate
+# `.github/workflows/release.yml` with shell/powershell installers, a Homebrew
+# formula in the tap and a Scoop manifest. Pin `cargo-dist-version` to the
+# installed `dist` when you first run it.
+[workspace.metadata.dist]
+cargo-dist-version = "0.28.0"
+ci = "github"
+installers = ["shell", "powershell", "homebrew"]
+tap = "deeplabua/homebrew-tap"
+publish-jobs = ["homebrew"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+install-updater = false
+
+# ffmpeg is a runtime dependency; have the Homebrew formula pull it in.
+[workspace.metadata.dist.dependencies.homebrew]
+ffmpeg = "*"

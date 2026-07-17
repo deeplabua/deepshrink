@@ -1,0 +1,12 @@
+[package]
+name = "deepshrink-core"
+description = "DeepShrink core: pure, testable logic (size parsing, presets, engine contract)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+deepshrink-ffmpeg.workspace = true

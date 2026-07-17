@@ -1,0 +1,66 @@
+# Release pipeline: on a `v*` tag, build binaries for macOS/Linux/Windows and
+# attach archives to the GitHub Release.
+#
+# This is a straightforward, works-today pipeline. Once `dist` (cargo-dist) is
+# installed, `dist init` regenerates this file to also produce shell/powershell
+# installers, a Homebrew formula in `deeplabua/homebrew-tap` (with a
+# `depends_on "ffmpeg"`) and a Scoop manifest — see `[workspace.metadata.dist]`
+# in Cargo.toml.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo build --release --locked --bin deepshrink --target ${{ matrix.target }}
+
+      - name: package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          name="deepshrink-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/deepshrink" "$name/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$name/"
+          tar czf "$name.tar.gz" "$name"
+
+      - name: package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "deepshrink-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $name | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/deepshrink.exe" $name/
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE $name/
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+
+      - name: upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            deepshrink-*.tar.gz
+            deepshrink-*.zip
