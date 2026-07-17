@@ -99,8 +99,8 @@ fn vmaf_quality_mode_reports_score() {
     assert!(sample.exists(), "original was removed");
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let vmaf = parse_json_vmaf(&stdout)
-        .unwrap_or_else(|| panic!("no vmaf in JSON output: {stdout:?}"));
+    let vmaf =
+        parse_json_vmaf(&stdout).unwrap_or_else(|| panic!("no vmaf in JSON output: {stdout:?}"));
     // A measured score must land in a sane corridor; the synthetic pattern
     // compresses very well, so it should sit comfortably high.
     assert!(
@@ -111,15 +111,24 @@ fn vmaf_quality_mode_reports_score() {
     // The result must be a valid, playable H.264 video.
     let probe = Command::new("ffprobe")
         .args([
-            "-v", "error", "-select_streams", "v:0", "-show_entries",
-            "stream=codec_name", "-of", "csv=p=0",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "csv=p=0",
         ])
         .arg(&output)
         .output()
         .expect("run ffprobe");
     assert!(probe.status.success(), "ffprobe rejected the output");
     let codec = String::from_utf8_lossy(&probe.stdout);
-    assert!(codec.trim().starts_with("h264"), "unexpected codec: {codec:?}");
+    assert!(
+        codec.trim().starts_with("h264"),
+        "unexpected codec: {codec:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
