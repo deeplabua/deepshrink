@@ -5,6 +5,7 @@
 [![CI](https://github.com/deeplabua/deepshrink/actions/workflows/ci.yml/badge.svg)](https://github.com/deeplabua/deepshrink/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/deepshrink.svg)](https://crates.io/crates/deepshrink)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Stars](https://img.shields.io/github/stars/deeplabua/deepshrink?style=flat&logo=github&label=Star)](https://github.com/deeplabua/deepshrink/stargazers)
 
 `deepshrink` compresses a video or audio file to a target size in a single command.
 Need a clip under Discord's 8 MB limit, an email's 25 MB cap, or a Telegram / WhatsApp
@@ -14,7 +15,11 @@ without watermarks.
 
 A thin, fast Rust layer over ffmpeg.
 
-> **Status:** early development (pre-alpha). v0.1 targets **video and audio**.
+> **Status:** released and actively developed (v0.3). Handles **video and audio**, with
+> target-size and VMAF-quality modes, H.264/H.265, and batch processing. Install via
+> Homebrew or crates.io.
+>
+> If DeepShrink is useful to you, please **[⭐ star the repo](https://github.com/deeplabua/deepshrink)** — it genuinely helps. See [Support](#support) to chip in.
 
 ## Why
 
@@ -118,9 +123,19 @@ installer as usual.)
 
 ## Scope
 
-v0.1 handles **video and audio** (the ffmpeg engine). Images, PDF, and office files are a
-planned "universal compressor" path built on pluggable engines. GIFs are handled by a
+DeepShrink handles **video and audio** (the ffmpeg engine). Images, PDF, and office files
+are a planned "universal compressor" path built on pluggable engines. GIFs are handled by a
 sibling tool, DeepGif.
+
+## Support
+
+DeepShrink is free and open-source, built and maintained by one developer.
+
+- **[⭐ Star the repo](https://github.com/deeplabua/deepshrink)** — the cheapest way to help;
+  it boosts visibility so more people find the tool.
+- **Chip in a tip** via the **Sponsor** button at the top of the repo, or directly through the
+  [monobank jar](https://send.monobank.ua/jar/9sb4WzNQwj). It supports a Ukrainian developer
+  and keeps the project moving. Thank you 💙💛
 
 ## Part of DeepLab
 
