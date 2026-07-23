@@ -9,6 +9,7 @@
 pub enum VideoCodec {
     H264,
     H265,
+    Av1,
 }
 
 impl VideoCodec {
@@ -17,6 +18,18 @@ impl VideoCodec {
         match self {
             VideoCodec::H264 => "libx264",
             VideoCodec::H265 => "libx265",
+            // SVT-AV1 is the practical default: far faster than libaom at
+            // comparable quality, and present in mainstream ffmpeg builds.
+            VideoCodec::Av1 => "libsvtav1",
+        }
+    }
+
+    /// A second encoder to try when [`encoder`](Self::encoder) is missing from
+    /// the local ffmpeg build. Only AV1 has one — x264/x265 are universal.
+    pub fn fallback_encoder(self) -> Option<&'static str> {
+        match self {
+            VideoCodec::Av1 => Some("libaom-av1"),
+            _ => None,
         }
     }
 
@@ -26,6 +39,7 @@ impl VideoCodec {
             VideoCodec::H264 => None,
             // Without hvc1, HEVC in MP4 won't play in QuickTime/Safari.
             VideoCodec::H265 => Some("hvc1"),
+            VideoCodec::Av1 => Some("av01"),
         }
     }
 
@@ -34,16 +48,18 @@ impl VideoCodec {
         match self {
             VideoCodec::H264 => "H.264",
             VideoCodec::H265 => "H.265",
+            VideoCodec::Av1 => "AV1",
         }
     }
 
     /// Inclusive CRF range to search when targeting a VMAF score, best quality
     /// (lowest CRF) first. x265's CRF scale is shifted ~+6 vs x264 for the same
-    /// perceptual quality, so the bounds differ per codec.
+    /// perceptual quality, and AV1's runs 0..63 — so the bounds differ per codec.
     pub fn crf_search_bounds(self) -> (u8, u8) {
         match self {
             VideoCodec::H264 => (18, 32),
             VideoCodec::H265 => (22, 36),
+            VideoCodec::Av1 => (25, 50),
         }
     }
 }
@@ -129,9 +145,38 @@ impl QualityPreset {
         }
     }
 
+    /// The speed/quality knob for a specific *encoder*, as `(flag, value)`.
+    ///
+    /// Encoders disagree on both the flag and its scale: x264/x265 take named
+    /// `-preset`s, SVT-AV1 takes a numeric `-preset` (0 slowest … 13 fastest),
+    /// and libaom takes `-cpu-used`. Passing an x264 preset name to SVT-AV1 is
+    /// a hard ffmpeg error, so the argv builder must ask per encoder.
+    pub fn speed_flags(self, encoder: &str) -> (&'static str, &'static str) {
+        match encoder {
+            "libsvtav1" => (
+                "-preset",
+                match self {
+                    QualityPreset::Fast => "9",
+                    QualityPreset::Balanced => "7",
+                    QualityPreset::Max => "5",
+                },
+            ),
+            "libaom-av1" => (
+                "-cpu-used",
+                match self {
+                    QualityPreset::Fast => "8",
+                    QualityPreset::Balanced => "5",
+                    QualityPreset::Max => "3",
+                },
+            ),
+            _ => ("-preset", self.encoder_preset()),
+        }
+    }
+
     /// Default quality-mode CRF for a codec. x265 needs a higher CRF than x264
-    /// for comparable quality, so the numbers are codec-specific. These defaults
-    /// aim for roughly VMAF ~93 (visually near-transparent) on typical content.
+    /// for comparable quality, and AV1 higher still, so the numbers are
+    /// codec-specific. These defaults aim for roughly VMAF ~93 (visually
+    /// near-transparent) on typical content.
     pub fn default_crf(self, codec: VideoCodec) -> u8 {
         match codec {
             VideoCodec::H264 => match self {
@@ -143,6 +188,11 @@ impl QualityPreset {
                 QualityPreset::Fast => 30,
                 QualityPreset::Balanced => 28,
                 QualityPreset::Max => 24,
+            },
+            VideoCodec::Av1 => match self {
+                QualityPreset::Fast => 38,
+                QualityPreset::Balanced => 35,
+                QualityPreset::Max => 30,
             },
         }
     }

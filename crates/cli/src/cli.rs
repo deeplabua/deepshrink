@@ -36,7 +36,7 @@ pub struct Cli {
     pub for_preset: Option<String>,
 
     // --- Video ---
-    /// Video codec (default: h264 for compatibility).
+    /// Video codec (default: h264 for compatibility; av1 = smallest, slowest).
     #[arg(long, value_enum)]
     pub codec: Option<VideoCodec>,
 
@@ -114,6 +114,9 @@ pub enum VideoCodec {
     H264,
     #[value(name = "h265")]
     H265,
+    /// AV1 via SVT-AV1 (libaom as a fallback). Needs an ffmpeg built with one.
+    #[value(name = "av1")]
+    Av1,
 }
 
 /// Audio codec choice.

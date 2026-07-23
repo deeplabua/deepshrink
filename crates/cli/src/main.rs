@@ -445,6 +445,7 @@ fn build_opts(cli: &Cli, goal: SizeGoal) -> Result<ShrinkOpts, AppError> {
         video_codec: match cli.codec {
             Some(cli::VideoCodec::H264) | None => VideoCodec::H264,
             Some(cli::VideoCodec::H265) => VideoCodec::H265,
+            Some(cli::VideoCodec::Av1) => VideoCodec::Av1,
         },
         audio: parse_audio(&cli.audio)?,
         resolution: parse_resolution(&cli.resolution)?,
@@ -466,6 +467,11 @@ fn build_opts(cli: &Cli, goal: SizeGoal) -> Result<ShrinkOpts, AppError> {
         // A directory `--output` is resolved per-file in `process_one` (the
         // engine derives the filename); pass only an explicit file path here.
         output: cli.output.as_ref().filter(|p| !p.is_dir()).cloned(),
+        // The CLI has no flag for either: two-pass is the engine's own call for
+        // a size target, and documents are out of its scope (video + audio only)
+        // — both fields exist for the engines the desktop layer plugs in.
+        two_pass: None,
+        dpi: None,
     })
 }
 

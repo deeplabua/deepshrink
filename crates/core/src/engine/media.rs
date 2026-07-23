@@ -47,16 +47,17 @@ impl MediaEngine {
         on_progress: &mut dyn FnMut(PassKind, f64),
     ) -> Result<Outcome, EngineError> {
         let tools = deepshrink_ffmpeg::locate()?;
+        let encoder = resolve_encoder(&tools, plan)?;
 
         // VMAF-targeted quality search: applies to CRF-mode video only. Size /
         // audio / passthrough encodes keep their existing single path.
         if let Some(target_vmaf) = plan.target_vmaf {
             if plan.spec.video.crf.is_some() && !plan.spec.audio_only && !plan.spec.passthrough {
-                return self.run_crf_search(&tools, plan, target_vmaf, on_progress);
+                return self.run_crf_search(&tools, plan, encoder, target_vmaf, on_progress);
             }
         }
 
-        let mut outcome = self.run_plain(&tools, plan, on_progress)?;
+        let mut outcome = self.run_plain(&tools, plan, encoder, on_progress)?;
 
         // Size-targeted video with `--vmaf`: encode to budget, then report the
         // VMAF actually achieved (best effort — a failed measurement is silent).
@@ -72,22 +73,27 @@ impl MediaEngine {
         &self,
         tools: &deepshrink_ffmpeg::Tools,
         plan: &EncodePlan,
+        encoder: &str,
         on_progress: &mut dyn FnMut(PassKind, f64),
     ) -> Result<Outcome, EngineError> {
         let passlog = passlog_base(plan);
         let total = plan.source_duration_sec;
 
+        if plan.spec.passthrough {
+            return self.run_passthrough(tools, plan, on_progress);
+        }
+
         if plan.spec.two_pass {
-            let args1 = build_pass_args(plan, PassKind::First, &passlog);
+            let args1 = build_pass_args(plan, PassKind::First, &passlog, encoder);
             deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args1, total, &mut |f| {
                 on_progress(PassKind::First, f)
             })?;
-            let args2 = build_pass_args(plan, PassKind::Second, &passlog);
+            let args2 = build_pass_args(plan, PassKind::Second, &passlog, encoder);
             deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args2, total, &mut |f| {
                 on_progress(PassKind::Second, f)
             })?;
         } else {
-            let args = build_pass_args(plan, PassKind::Single, &passlog);
+            let args = build_pass_args(plan, PassKind::Single, &passlog, encoder);
             deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, total, &mut |f| {
                 on_progress(PassKind::Single, f)
             })?;
@@ -103,7 +109,7 @@ impl MediaEngine {
                 if corrected >= budget::ABSOLUTE_MIN_VIDEO_BPS {
                     let mut retry = plan.clone();
                     retry.spec.video.bitrate_bps = Some(corrected);
-                    let args = build_pass_args(&retry, PassKind::Second, &passlog);
+                    let args = build_pass_args(&retry, PassKind::Second, &passlog, encoder);
                     deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, total, &mut |f| {
                         on_progress(PassKind::Second, f)
                     })?;
@@ -113,6 +119,38 @@ impl MediaEngine {
         }
 
         cleanup_passlog(&passlog);
+        Ok(Outcome {
+            output: plan.output.clone(),
+            final_bytes: size,
+            vmaf: None,
+        })
+    }
+
+    /// Passthrough: the source already fits, so its streams are copied as-is.
+    ///
+    /// A stream copy is normally the cheapest and safest path, but it is not
+    /// infallible — some codecs simply cannot be muxed by the container's muxer
+    /// (ffmpeg needs a parser it may not have). Since nothing is being
+    /// re-encoded here, a failed remux falls back to copying the file verbatim:
+    /// the promise of this branch is "you get your file, unchanged and within
+    /// target", and that must hold for every input.
+    fn run_passthrough(
+        &self,
+        tools: &deepshrink_ffmpeg::Tools,
+        plan: &EncodePlan,
+        on_progress: &mut dyn FnMut(PassKind, f64),
+    ) -> Result<Outcome, EngineError> {
+        // Stream copy — the video encoder is never reached.
+        let args = build_pass_args(plan, PassKind::Single, "", "copy");
+        let remuxed =
+            deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, plan.source_duration_sec, &mut |f| {
+                on_progress(PassKind::Single, f)
+            });
+        if remuxed.is_err() {
+            fs::copy(&plan.input, &plan.output)?;
+            on_progress(PassKind::Single, 1.0);
+        }
+        let size = fs::metadata(&plan.output)?.len();
         Ok(Outcome {
             output: plan.output.clone(),
             final_bytes: size,
@@ -130,12 +168,13 @@ impl MediaEngine {
         &self,
         tools: &deepshrink_ffmpeg::Tools,
         plan: &EncodePlan,
+        encoder: &str,
         target_vmaf: f64,
         on_progress: &mut dyn FnMut(PassKind, f64),
     ) -> Result<Outcome, EngineError> {
         let (ref_w, ref_h) = match (plan.source_width, plan.source_height) {
             (Some(w), Some(h)) => (w, h),
-            _ => return self.run_plain(tools, plan, on_progress),
+            _ => return self.run_plain(tools, plan, encoder, on_progress),
         };
         let ref_fps = plan.source_fps.unwrap_or(0.0);
         let total = plan.source_duration_sec;
@@ -149,7 +188,7 @@ impl MediaEngine {
             if err.is_some() {
                 return f64::NEG_INFINITY;
             }
-            match encode_at_crf(tools, plan, crf, total, on_progress).and_then(|()| {
+            match encode_at_crf(tools, plan, encoder, crf, total, on_progress).and_then(|()| {
                 last_crf = Some(crf);
                 deepshrink_ffmpeg::measure_vmaf(
                     &tools.ffmpeg,
@@ -175,7 +214,7 @@ impl MediaEngine {
 
         // Leave the chosen CRF on disk (the search may have ended elsewhere).
         if last_crf != Some(chosen_crf) {
-            encode_at_crf(tools, plan, chosen_crf, total, on_progress)?;
+            encode_at_crf(tools, plan, encoder, chosen_crf, total, on_progress)?;
         }
         let size = fs::metadata(&plan.output)?.len();
         Ok(Outcome {
@@ -287,6 +326,7 @@ impl MediaEngine {
                 two_pass: false,
                 passthrough: false,
                 audio_only: true,
+                dpi: None,
             },
         })
     }
@@ -350,9 +390,21 @@ impl Engine for MediaEngine {
             .unwrap_or_else(|| output_with_ext(&info.path, "mp4"));
 
         // "Never make it bigger": if the source already fits the target, just
-        // remux (stream copy) instead of re-encoding it up to the target.
+        // remux (stream copy) instead of re-encoding it up to the target. The
+        // copy stays in the *source* container — an .mp4 cannot hold every codec
+        // a source may carry (an AMR-NB track from a .3gp, say), and a stream
+        // copy must not be the thing that breaks a file we aren't even re-encoding.
         if let Some(tb) = target {
             if info.size_bytes > 0 && info.size_bytes <= tb {
+                let src_ext = info
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("mp4");
+                let output = opts
+                    .output
+                    .clone()
+                    .unwrap_or_else(|| output_with_ext(&info.path, src_ext));
                 return Ok(passthrough_plan(info, output, tb, true));
             }
         }
@@ -400,7 +452,10 @@ impl Engine for MediaEngine {
             )
         };
 
-        let two_pass = video.bitrate_bps.is_some();
+        // Two-pass is how a bitrate budget is actually hit; the caller can force
+        // it off (faster, looser) but can't force it on in CRF mode, where there
+        // is no budget for a first pass to measure.
+        let two_pass = video.bitrate_bps.is_some() && opts.two_pass.unwrap_or(true);
         let summary = build_summary(&video, audio.as_ref(), two_pass);
 
         Ok(EncodePlan {
@@ -421,6 +476,7 @@ impl Engine for MediaEngine {
                 two_pass,
                 passthrough: false,
                 audio_only: false,
+                dpi: None,
             },
         })
     }
@@ -463,6 +519,7 @@ fn passthrough_plan(info: &MediaInfo, output: PathBuf, target: u64, faststart: b
             two_pass: false,
             passthrough: true,
             audio_only: false,
+            dpi: None,
         },
     }
 }
@@ -509,16 +566,25 @@ fn decide_audio(
     if !has_audio {
         return Ok(None);
     }
+    // A `--mono` request downmixes the kept audio track (speech clips / smaller
+    // files). A single-channel source stays mono regardless.
+    let mono = opts.mono;
     match opts.audio {
         AudioChoice::Drop => Ok(None),
-        AudioChoice::Bitrate(b) => Ok(Some(AudioSpec::cbr(AudioCodec::Aac, b))),
+        AudioChoice::Bitrate(b) => Ok(Some(AudioSpec {
+            mono,
+            ..AudioSpec::cbr(AudioCodec::Aac, b)
+        })),
         AudioChoice::Keep => {
             let bps = match target {
                 Some(tb) => budget::fit_audio_bps(tb, duration, AUDIO_LADDER)
                     .ok_or(EngineError::Infeasible)?,
                 None => budget::DEFAULT_AUDIO_BPS,
             };
-            Ok(Some(AudioSpec::cbr(AudioCodec::Aac, bps)))
+            Ok(Some(AudioSpec {
+                mono,
+                ..AudioSpec::cbr(AudioCodec::Aac, bps)
+            }))
         }
     }
 }
@@ -620,6 +686,7 @@ fn cleanup_passlog(base: &str) {
 fn encode_at_crf(
     tools: &deepshrink_ffmpeg::Tools,
     plan: &EncodePlan,
+    encoder: &str,
     crf: u8,
     total: f64,
     on_progress: &mut dyn FnMut(PassKind, f64),
@@ -628,7 +695,7 @@ fn encode_at_crf(
     trial.spec.video.crf = Some(crf);
     trial.spec.video.bitrate_bps = None;
     trial.spec.two_pass = false;
-    let args = build_pass_args(&trial, PassKind::Single, "");
+    let args = build_pass_args(&trial, PassKind::Single, "", encoder);
     deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, total, &mut |f| {
         on_progress(PassKind::Single, f)
     })?;
@@ -651,9 +718,48 @@ fn null_sink() -> &'static str {
     }
 }
 
+/// Pick the ffmpeg encoder to drive this plan with.
+///
+/// x264/x265 are in every build worth supporting, so they're taken on faith —
+/// asking ffmpeg costs a process spawn per run. AV1 is the exception: builds
+/// disagree on which (if any) AV1 encoder they carry, so it's probed, with
+/// libaom as the fallback and a plain-English error when neither is present
+/// (better than handing the user ffmpeg's "Unknown encoder" dump).
+fn resolve_encoder(
+    tools: &deepshrink_ffmpeg::Tools,
+    plan: &EncodePlan,
+) -> Result<&'static str, EngineError> {
+    let codec = plan.spec.video.codec;
+    let primary = codec.encoder();
+    let Some(fallback) = codec.fallback_encoder() else {
+        return Ok(primary);
+    };
+    // Passthrough/audio-only encodes never touch the video encoder.
+    if plan.spec.passthrough || plan.spec.audio_only {
+        return Ok(primary);
+    }
+    if deepshrink_ffmpeg::has_encoder(&tools.ffmpeg, primary) {
+        return Ok(primary);
+    }
+    if deepshrink_ffmpeg::has_encoder(&tools.ffmpeg, fallback) {
+        return Ok(fallback);
+    }
+    Err(EngineError::Unsupported(format!(
+        "this ffmpeg build has no {} encoder (looked for {primary} and {fallback})",
+        codec.label()
+    )))
+}
+
 /// Build the ffmpeg argv for one pass. Video-processing options (codec, filters,
-/// bitrate) are shared across passes; audio/output differ per pass.
-fn build_pass_args(plan: &EncodePlan, pass: PassKind, passlog: &str) -> Vec<OsString> {
+/// bitrate) are shared across passes; audio/output differ per pass. `encoder` is
+/// the resolved `-c:v` name (see [`resolve_encoder`]) — it can differ from the
+/// codec's default for AV1.
+fn build_pass_args(
+    plan: &EncodePlan,
+    pass: PassKind,
+    passlog: &str,
+    encoder: &str,
+) -> Vec<OsString> {
     let s = &plan.spec;
     let mut a: Vec<OsString> = Vec::new();
     // Local helper — a macro (not a closure) so it doesn't hold a borrow of `a`
@@ -715,7 +821,7 @@ fn build_pass_args(plan: &EncodePlan, pass: PassKind, passlog: &str) -> Vec<OsSt
 
     // Video codec + filters.
     push!("-c:v");
-    push!(s.video.codec.encoder());
+    push!(encoder);
     if let Some(h) = s.video.height {
         push!("-vf");
         push!(format!("scale=-2:{h}"));
@@ -724,8 +830,11 @@ fn build_pass_args(plan: &EncodePlan, pass: PassKind, passlog: &str) -> Vec<OsSt
         push!("-r");
         push!(f.to_string());
     }
-    push!("-preset");
-    push!(s.video.preset.encoder_preset());
+    // The speed knob is per-encoder: `-preset medium` is meaningless (and fatal)
+    // to SVT-AV1, which wants a number.
+    let (speed_flag, speed_value) = s.video.preset.speed_flags(encoder);
+    push!(speed_flag);
+    push!(speed_value);
     if let Some(tag) = s.video.codec.mp4_tag() {
         push!("-tag:v");
         push!(tag);
@@ -767,6 +876,13 @@ fn build_pass_args(plan: &EncodePlan, pass: PassKind, passlog: &str) -> Vec<OsSt
                 Some(au) => {
                     push!("-c:a");
                     push!(au.codec.encoder());
+                    // A mono downmix has to reach ffmpeg here too — the audio
+                    // track of a video is muxed in this pass, not the audio-only
+                    // branch above.
+                    if au.mono {
+                        push!("-ac");
+                        push!("1");
+                    }
                     push!("-b:a");
                     push!(au.bitrate_bps.to_string());
                 }
@@ -787,6 +903,12 @@ mod tests {
     use super::*;
     use crate::options::{AudioCodec, QualityPreset, VideoCodec};
     use crate::size::preset;
+
+    /// The encoder `run` would resolve for a plan without probing ffmpeg (every
+    /// codec these tests use has its primary encoder everywhere).
+    fn enc(plan: &EncodePlan) -> &'static str {
+        plan.spec.video.codec.encoder()
+    }
 
     fn video_info(duration: f64, size: u64, w: u32, h: u32, audio: bool) -> MediaInfo {
         MediaInfo {
@@ -838,6 +960,57 @@ mod tests {
     }
 
     #[test]
+    fn plan_video_mono_downmixes_the_audio_track() {
+        let info = video_info(60.0, 100_000_000, 1280, 720, true);
+        let opts = ShrinkOpts {
+            mono: true,
+            ..opts_target(8_000_000)
+        };
+        let plan = MediaEngine::new().plan(&info, &opts).unwrap();
+        let audio = plan.spec.audio.as_ref().expect("kept audio track");
+        assert!(audio.mono, "opts.mono downmixes the video's audio track");
+        // A stereo request stays stereo.
+        let stereo = MediaEngine::new()
+            .plan(&info, &opts_target(8_000_000))
+            .unwrap();
+        assert!(!stereo.spec.audio.as_ref().unwrap().mono);
+    }
+
+    #[test]
+    fn video_mono_reaches_ffmpeg_as_ac_1() {
+        // The plan carrying `mono` is only half the job — the muxing pass of a
+        // video encode has to actually emit `-ac 1`, or the output stays stereo.
+        let info = video_info(60.0, 100_000_000, 1280, 720, true);
+        let plan = MediaEngine::new()
+            .plan(
+                &info,
+                &ShrinkOpts {
+                    mono: true,
+                    ..opts_target(8_000_000)
+                },
+            )
+            .unwrap();
+        let args = build_pass_args(&plan, PassKind::Second, "/tmp/passlog", enc(&plan));
+        let joined: Vec<String> = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let ac = joined.iter().position(|a| a == "-ac").expect("-ac emitted");
+        assert_eq!(joined[ac + 1], "1");
+
+        // Stereo request → no downmix flag at all.
+        let stereo = MediaEngine::new()
+            .plan(&info, &opts_target(8_000_000))
+            .unwrap();
+        let stereo_args: Vec<String> =
+            build_pass_args(&stereo, PassKind::Second, "/tmp/passlog", enc(&stereo))
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+        assert!(!stereo_args.iter().any(|a| a == "-ac"));
+    }
+
+    #[test]
     fn plan_preset_discord_sets_target() {
         let info = video_info(30.0, 50_000_000, 1280, 720, true);
         let opts = ShrinkOpts {
@@ -869,12 +1042,30 @@ mod tests {
         assert!(plan.spec.passthrough);
         assert!(!plan.spec.two_pass);
         assert_eq!(plan.expected_bytes, Some(200_000));
-        let args = build_pass_args(&plan, PassKind::Single, "/tmp/passlog");
+        let args = build_pass_args(&plan, PassKind::Single, "/tmp/passlog", enc(&plan));
         let joined: Vec<String> = args
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert!(joined.contains(&"copy".to_string()));
+        // Same container as the source: a stream copy must land somewhere its
+        // codecs are muxable.
+        assert_eq!(plan.output, PathBuf::from("/tmp/clip.shrink.mp4"));
+    }
+
+    #[test]
+    fn plan_passthrough_keeps_the_source_container() {
+        // A .3gp may carry codecs (AMR-NB) that no .mp4 muxer accepts — copying
+        // its streams into an .mp4 would fail on a file we aren't re-encoding.
+        let info = MediaInfo {
+            path: PathBuf::from("/tmp/voice.3gp"),
+            ..video_info(10.0, 200_000, 320, 240, true)
+        };
+        let plan = MediaEngine::new()
+            .plan(&info, &opts_target(1_000_000))
+            .unwrap();
+        assert!(plan.spec.passthrough);
+        assert_eq!(plan.output, PathBuf::from("/tmp/voice.shrink.3gp"));
     }
 
     #[test]
@@ -960,7 +1151,7 @@ mod tests {
         };
         let plan = MediaEngine::new().plan(&info, &opts).unwrap();
         assert_eq!(plan.output, PathBuf::from("/tmp/lecture.shrink.opus"));
-        let args = build_pass_args(&plan, PassKind::Single, "/tmp/passlog");
+        let args = build_pass_args(&plan, PassKind::Single, "/tmp/passlog", enc(&plan));
         let j: Vec<String> = args
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
@@ -997,7 +1188,7 @@ mod tests {
         let plan = MediaEngine::new()
             .plan(&info, &opts_target(8_000_000))
             .unwrap();
-        let args = build_pass_args(&plan, PassKind::First, "/tmp/passlog");
+        let args = build_pass_args(&plan, PassKind::First, "/tmp/passlog", enc(&plan));
         let joined: Vec<String> = args
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
@@ -1014,7 +1205,7 @@ mod tests {
         let plan = MediaEngine::new()
             .plan(&info, &opts_target(8_000_000))
             .unwrap();
-        let args = build_pass_args(&plan, PassKind::Second, "/tmp/passlog");
+        let args = build_pass_args(&plan, PassKind::Second, "/tmp/passlog", enc(&plan));
         let joined: Vec<String> = args
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
@@ -1033,7 +1224,7 @@ mod tests {
             ..opts_target(8_000_000)
         };
         let plan = MediaEngine::new().plan(&info, &opts).unwrap();
-        let args = build_pass_args(&plan, PassKind::Second, "/tmp/passlog");
+        let args = build_pass_args(&plan, PassKind::Second, "/tmp/passlog", enc(&plan));
         let joined: Vec<String> = args
             .iter()
             .map(|a| a.to_string_lossy().into_owned())

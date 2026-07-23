@@ -74,6 +74,16 @@ pub struct ShrinkOpts {
     pub target_vmaf: Option<f64>,
     /// Explicit output path; when `None` the engine derives one.
     pub output: Option<PathBuf>,
+    /// Force two-pass on or off for a size-targeted video encode. `None` lets
+    /// the engine decide (two-pass whenever it encodes to a bitrate budget).
+    /// `Some(true)` is only meaningful in bitrate mode — a CRF encode has no
+    /// budget for a first pass to measure.
+    pub two_pass: Option<bool>,
+    /// Target resolution (dots per inch) for raster images *embedded in a
+    /// document*, measured at the size they are placed on the page. Only the
+    /// document engines act on it — the media engine ignores it, as pixels in a
+    /// video have no physical size.
+    pub dpi: Option<u32>,
 }
 
 impl Default for ShrinkOpts {
@@ -91,6 +101,8 @@ impl Default for ShrinkOpts {
             vbr: false,
             target_vmaf: None,
             output: None,
+            two_pass: None,
+            dpi: None,
         }
     }
 }
@@ -149,6 +161,9 @@ pub struct EncodeSpec {
     pub passthrough: bool,
     /// Pure-audio encode: emit `-vn` and use `audio` only (`video` is ignored).
     pub audio_only: bool,
+    /// Target DPI for a document's embedded images (see [`ShrinkOpts::dpi`]).
+    /// Document engines only; ignored by the media engine.
+    pub dpi: Option<u32>,
 }
 
 /// The encode plan — the result of [`Engine::plan`]. Usable for `--dry-run`.
