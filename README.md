@@ -83,12 +83,18 @@ Target a perceptual quality instead of a size, or pick a more efficient codec:
 ```sh
 deepshrink clip.mp4 --vmaf 93            # smallest file that still scores VMAF ≥ 93
 deepshrink clip.mp4 --codec h265         # HEVC — smaller at the same quality
+deepshrink clip.mp4 --codec av1          # AV1 — smallest of all, slowest to encode
 ```
 
 `--vmaf` searches the encoder's quality setting (CRF) for the smallest output that meets
 your target VMAF, and reports the score it achieved. It needs an ffmpeg built with the
 `libvmaf` filter; without it, DeepShrink skips the measurement and encodes at a sensible
 default. When a size target is set, `--vmaf` reports the VMAF actually achieved.
+
+`--codec av1` uses SVT-AV1 (falling back to libaom-av1); it needs an ffmpeg built with one
+of those encoders, and DeepShrink says so plainly if neither is present. `--mono` downmixes
+the audio to one channel — useful for speech — and applies to a video's audio track as well
+as to a pure-audio input.
 
 The original file is never modified — DeepShrink writes a new `*.shrink.*` file unless
 you pass `--overwrite`.
