@@ -20,8 +20,8 @@ Pre-alpha / early development. v0.1 targets **video and audio**.
 "Compress" spans different engines, so to stay focused:
 
 - **v0.1 = video + audio only** (ffmpeg engine).
-- **Images / PDF / office** (mozjpeg·pngquant / ghostscript / zip+downsample) are a planned
-  "universal compressor" path via pluggable engines — **not** v0.1.
+- **Images / PDF / office** are handled by proprietary desktop engines in `desktop/crates/engines-pro`
+  (mozjpeg·oxipng·exoquant / lopdf image-pass / zip repack) — **not** part of this CLI; NO Ghostscript (AGPL).
 - **GIF is a separate tool (DeepGif)** — don't add it here.
 
 The core is designed around an `Engine` trait (`supports` / `probe` / `plan` / `run`) so new
