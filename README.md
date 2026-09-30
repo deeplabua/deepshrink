@@ -16,8 +16,9 @@ without watermarks.
 A thin, fast Rust layer over ffmpeg.
 
 > **Status:** released and actively developed (v0.3). Handles **video and audio**, with
-> target-size and VMAF-quality modes, H.264/H.265, and batch processing. Install via
-> Homebrew or crates.io.
+> target-size and VMAF-quality modes, H.264/H.265/AV1, batch processing, and a
+> "never bigger" guard for already-compact files. Install via Homebrew or crates.io.
+> See the [changelog](CHANGELOG.md).
 >
 > If DeepShrink is useful to you, please **[⭐ star the repo](https://github.com/deeplabua/deepshrink)** — it genuinely helps. See [Support](#support) to chip in.
 
@@ -86,6 +87,13 @@ deepshrink clip.mp4 --codec h265         # HEVC — smaller at the same quality
 deepshrink clip.mp4 --codec av1          # AV1 — smallest of all, slowest to encode
 ```
 
+Without a size target DeepShrink never makes a file bigger — an already-compact file is
+kept as-is. To re-encode anyway:
+
+```sh
+deepshrink clip.mp4 --allow-larger
+```
+
 `--vmaf` searches the encoder's quality setting (CRF) for the smallest output that meets
 your target VMAF, and reports the score it achieved. It needs an ffmpeg built with the
 `libvmaf` filter; without it, DeepShrink skips the measurement and encodes at a sensible
@@ -117,6 +125,13 @@ Platform limits change over time — verify against the current service.
 bitrate that fits the target (minus container overhead), then runs a **two-pass** encode
 for video, or picks a codec bitrate for audio. If the result overshoots the target, it
 corrects once. Run with `--dry-run` to see the plan first.
+
+**Never bigger.** Without a size target (quality mode) DeepShrink won't hand back a file
+that isn't smaller: re-encoding an already-compact file only loses quality. Video is
+predicted from three short sample encodes first (an already-optimal clip is recognised in
+seconds, not after a full encode); audio isn't re-encoded at or above its own bitrate; and
+every result is checked at the end. Such files are kept as-is (`already compact`). Pass
+`--allow-larger` to re-encode anyway.
 
 ## Update checks
 
