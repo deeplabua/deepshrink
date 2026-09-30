@@ -3,6 +3,21 @@
 All notable changes to DeepShrink. The release pipeline uses the matching
 `## [x.y.z]` section as the GitHub release notes.
 
+## [0.3.10] - 2026-09-30
+
+### Fixed
+
+- **Portrait phone video reads as portrait.** Phones store a portrait clip as a
+  landscape frame plus a rotation; the probe now applies it, so a clip reports
+  576 × 1024 (9:16), not 1024 × 576 — in `--dry-run`, JSON and for apps.
+- **Resolution caps mean the short side.** `--resolution 1080p` on a portrait
+  4K iPhone clip gives 1080 × 1920 (it gave a narrow 608 × 1080).
+
+### Library
+
+- `Stream::rotation()`, `Stream::display_size()` (`deepshrink-ffmpeg`);
+  `MediaInfo` width / height are as shown; `VideoSpec::portrait`.
+
 ## [0.3.9] - 2026-09-30
 
 ### Added
