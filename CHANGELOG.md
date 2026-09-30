@@ -3,6 +3,28 @@
 All notable changes to DeepShrink. The release pipeline uses the matching
 `## [x.y.z]` section as the GitHub release notes.
 
+## [0.3.9] - 2026-09-30
+
+### Added
+
+- **`--fast`: Apple's hardware encoder** (VideoToolbox, macOS on Apple Silicon).
+  3–5× faster and a fifth of the memory for the same visual quality (VMAF-
+  calibrated per quality tier), for a somewhat larger file — about the same
+  as x264 for H.264, ~50% larger than x265 for H.265. One pass; size targets
+  are hit with up to three corrections. HDR through Apple's H.264 (8-bit only)
+  becomes SDR. Ignored for AV1 and on Macs without it.
+
+### Changed
+
+- **Faster previews of heavy video.** `--dry-run` / `estimate` sample shorter
+  windows as the pixel rate grows (4K60: 1.5 s instead of 3 s) — half the time,
+  same accuracy (+3.3% vs +3.8% on a 60 s 4K60 clip).
+
+### Library (`deepshrink-core`)
+
+- `ShrinkOpts::hardware`, `VideoSpec::hardware`, `QualityPreset::default_hw_quality`,
+  `VideoCodec::hardware_encoder`, `media::hardware_encoding_available()`.
+
 ## [0.3.8] - 2026-09-30
 
 ### Changed

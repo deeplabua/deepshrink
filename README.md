@@ -138,6 +138,9 @@ bitrate that fits the target (minus container overhead), then runs a **two-pass*
 for video, or picks a codec bitrate for audio. If the result overshoots the target, it
 corrects once. Run with `--dry-run` to see the plan first.
 
+**`--fast` (Apple Silicon).** Encodes video with Apple's hardware encoder: 3–5× faster
+and far less memory at the same visual quality, for a somewhat larger file.
+
 **A target is a ceiling, not a quota.** When the quality preset alone lands well under the
 target (predicted from short sample encodes), that's what you get — a 2-second clip for
 Discord doesn't become 8 MB just because it could.
