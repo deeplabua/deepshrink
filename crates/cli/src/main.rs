@@ -300,6 +300,11 @@ fn process_one(
     }
 
     if cli.dry_run {
+        // Quality-mode video has no size in the plan: predict it from short
+        // samples so the dry run shows a real number (a couple of seconds).
+        if plan.expected_bytes.is_none() {
+            plan.expected_bytes = engine.estimate(&plan).ok().flatten();
+        }
         if cli.json {
             print_json(cli, &info, &plan, None);
         } else if !cli.quiet {

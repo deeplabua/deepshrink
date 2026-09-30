@@ -152,6 +152,27 @@ impl MediaEngine {
         })
     }
 
+    /// The expected output size of `plan`, without running it — the honest
+    /// preview for a UI. Size targets and audio come straight from the plan
+    /// (pure); a quality-mode (CRF) video is predicted from short sample
+    /// encodes, like the "never bigger" guard does (~2–3 s for any length).
+    /// Compare the result with the source: at or above it, a guarded run keeps
+    /// the original (`Outcome::already_compact`). `None` if it can't be told.
+    pub fn estimate(&self, plan: &EncodePlan) -> Result<Option<u64>, EngineError> {
+        if plan.spec.passthrough {
+            return Ok(fs::metadata(&plan.input).ok().map(|m| m.len()));
+        }
+        if let Some(bytes) = plan.expected_bytes {
+            return Ok(Some(bytes));
+        }
+        if plan.spec.audio_only || plan.spec.video.crf.is_none() {
+            return Ok(None);
+        }
+        let tools = deepshrink_ffmpeg::locate()?;
+        let encoder = resolve_encoder(&tools, plan)?;
+        Ok(predict_crf_bytes(&tools, plan, encoder))
+    }
+
     /// The guard fired: deliver the source as-is (a byte copy, in its own
     /// container/extension) instead of a re-encode that would not be smaller.
     fn keep_original(
@@ -362,7 +383,10 @@ impl MediaEngine {
                         "stream copy (already compact — a re-encode would not be smaller)".into();
                     return Ok(plan);
                 }
-                (bps, None)
+                // Constant-bitrate estimate (VBR lands close enough for a preview).
+                let predicted = (bps as f64 * duration / 8.0 * (1.0 + budget::CONTAINER_OVERHEAD))
+                    .round() as u64;
+                (bps, Some(predicted))
             }
         };
 
@@ -638,26 +662,37 @@ const SAMPLE_SECS: f64 = 3.0;
 /// 30 s phone clip: 20.4 MB predicted vs 18.7 MB real) — scale that back.
 const SAMPLE_BIAS: f64 = 0.92;
 
-/// Predict a CRF video encode's final size from three short sample encodes
-/// (same encoder, CRF, preset, scaling, fps; audio at the planned bitrate).
-/// `None` for short clips (a full encode is cheap; the post-encode check
-/// covers them) or when a sample fails.
+/// Predict a CRF video encode's final size from short sample encodes (same
+/// encoder, CRF, preset, scaling, fps; audio at the planned bitrate): three
+/// 3 s windows, or the whole clip when it's under 12 s. `None` if a sample fails.
 fn predict_crf_bytes(
     tools: &deepshrink_ffmpeg::Tools,
     plan: &EncodePlan,
     encoder: &str,
 ) -> Option<u64> {
     let duration = plan.source_duration_sec;
-    if !duration.is_finite() || duration < SAMPLE_SECS * 4.0 {
+    if !duration.is_finite() || duration <= 0.0 {
         return None;
     }
+    // Long clips: three 3 s windows. Short ones (< 12 s): the whole clip once —
+    // exact, and still cheap — so no keyframe bias to correct either.
+    let (windows, bias): (Vec<(f64, f64)>, f64) = if duration >= SAMPLE_SECS * 4.0 {
+        (
+            [0.2, 0.5, 0.8]
+                .iter()
+                .map(|at| ((duration * at - SAMPLE_SECS / 2.0).max(0.0), SAMPLE_SECS))
+                .collect(),
+            SAMPLE_BIAS,
+        )
+    } else {
+        (vec![(0.0, duration)], 1.0)
+    };
     let mut sample = plan.clone();
     sample.spec.audio = None;
     sample.spec.faststart = false;
     let mut video_bytes = 0u64;
     let mut sampled = 0.0;
-    for (i, at) in [0.2, 0.5, 0.8].iter().enumerate() {
-        let start = (duration * at - SAMPLE_SECS / 2.0).max(0.0);
+    for (i, &(start, len)) in windows.iter().enumerate() {
         sample.output =
             std::env::temp_dir().join(format!("deepshrink-sample-{}-{i}.mp4", std::process::id()));
         let mut args = build_pass_args(&sample, PassKind::Single, "", encoder);
@@ -668,16 +703,16 @@ fn predict_crf_bytes(
                 OsString::from("-ss"),
                 OsString::from(format!("{start:.2}")),
                 OsString::from("-t"),
-                OsString::from(format!("{SAMPLE_SECS}")),
+                OsString::from(format!("{len:.2}")),
             ],
         );
-        let ran = deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, SAMPLE_SECS, &mut |_| {});
+        let ran = deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, len, &mut |_| {});
         let bytes = fs::metadata(&sample.output).map(|m| m.len()).ok();
         let _ = fs::remove_file(&sample.output);
         video_bytes += bytes.filter(|_| ran.is_ok())?;
-        sampled += SAMPLE_SECS;
+        sampled += len;
     }
-    let video_bps = video_bytes as f64 * 8.0 / sampled * SAMPLE_BIAS;
+    let video_bps = video_bytes as f64 * 8.0 / sampled * bias;
     let audio_bps = plan.spec.audio.as_ref().map(|a| a.bitrate_bps).unwrap_or(0) as f64;
     Some(((video_bps + audio_bps) * duration / 8.0 * (1.0 + budget::CONTAINER_OVERHEAD)) as u64)
 }
