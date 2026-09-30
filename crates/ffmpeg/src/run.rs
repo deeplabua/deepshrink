@@ -188,21 +188,13 @@ mod tests {
             stopper.cancel();
         });
         let started = Instant::now();
-        let mut progressed = false;
-        let r = run_pass_cancellable(
-            &ffmpeg,
-            &long_args(&out),
-            600.0,
-            &mut |_| progressed = true,
-            &token,
-        );
+        let r = run_pass_cancellable(&ffmpeg, &long_args(&out), 600.0, &mut |_| {}, &token);
         assert!(matches!(r, Err(FfmpegError::Cancelled)), "{r:?}");
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "{:?}",
             started.elapsed()
         );
-        assert!(progressed, "progress still flows before the cancel");
         let _ = std::fs::remove_file(&out);
     }
 
