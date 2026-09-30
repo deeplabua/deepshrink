@@ -12,7 +12,8 @@ All notable changes to DeepShrink. The release pipeline uses the matching
   calibrated per quality tier), for a somewhat larger file — about the same
   as x264 for H.264, ~50% larger than x265 for H.265. One pass; size targets
   are hit with up to three corrections. HDR through Apple's H.264 (8-bit only)
-  becomes SDR. Ignored for AV1 and on Macs without it.
+  becomes SDR. macOS on Apple Silicon only: on Windows, Linux, Intel Macs and
+  for AV1 it prints a note and encodes in software.
 
 ### Changed
 

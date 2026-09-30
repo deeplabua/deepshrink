@@ -100,9 +100,10 @@ pub struct Cli {
     #[arg(long = "strip-metadata")]
     pub strip_metadata: bool,
 
-    /// Encode video with Apple's hardware encoder (macOS on Apple Silicon):
-    /// 3–5× faster and far less memory, for a larger file. Ignored elsewhere
-    /// and for AV1.
+    /// macOS on Apple Silicon only: encode video with Apple's hardware encoder
+    /// (VideoToolbox) — 3–5× faster and far less memory, for a larger file.
+    /// Elsewhere (Windows, Linux, Intel Macs) and for AV1 it prints a note and
+    /// encodes in software.
     #[arg(long)]
     pub fast: bool,
 

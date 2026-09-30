@@ -168,6 +168,24 @@ fn run(cli: &Cli) -> Result<(), AppError> {
 
     let mut opts = build_opts(cli, goal)?;
 
+    // `--fast` is Apple's hardware encoder: macOS on Apple Silicon only, and
+    // no AV1. Anywhere else say so, and encode in software as usual.
+    if opts.hardware && !cli.quiet && !cli.json {
+        let note = if opts.video_codec == deepshrink_core::VideoCodec::Av1 {
+            Some("note: --fast has no AV1 hardware encoder — using the software AV1 encoder")
+        } else if !deepshrink_core::engine::media::hardware_encoding_available() {
+            Some(
+                "note: --fast needs macOS on Apple Silicon (VideoToolbox) — \
+                 using the software encoder",
+            )
+        } else {
+            None
+        };
+        if let Some(note) = note {
+            eprintln!("  {}", note.if_supports_color(Stdout, |t| t.dimmed()));
+        }
+    }
+
     // `--vmaf` needs ffmpeg's libvmaf filter. If this build lacks it, degrade
     // gracefully: warn once and drop the target so encoding still proceeds.
     if opts.target_vmaf.is_some() {
