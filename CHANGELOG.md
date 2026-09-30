@@ -3,6 +3,19 @@
 All notable changes to DeepShrink. The release pipeline uses the matching
 `## [x.y.z]` section as the GitHub release notes.
 
+## [0.3.7] - 2026-09-30
+
+### Library (`deepshrink-core`, `deepshrink-ffmpeg`)
+
+- **Encodes can be stopped.** `MediaEngine::with_cancel(token)` — setting the
+  `CancelToken` from any thread kills the running ffmpeg within ~0.1 s,
+  removes the half-written output and the two-pass log, and returns an error
+  for which `EngineError::is_cancelled()` is true. Before, an app could only
+  stop listening while ffmpeg kept encoding in the background.
+- `deepshrink_ffmpeg::{CancelToken, run_pass_cancellable}`, `Tools::run_pass`,
+  `Tools::with_cancel`, `FfmpegError::Cancelled` (new); `Tools` gained a
+  `cancel` field and `MediaEngine` is no longer `Copy`.
+
 ## [0.3.6] - 2026-09-30
 
 ### Added
