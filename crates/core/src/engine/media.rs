@@ -548,8 +548,9 @@ impl Engine for MediaEngine {
             kind: detect_kind(input),
             duration_sec: p.duration_sec().unwrap_or(0.0),
             size_bytes,
-            width: video.and_then(|v| v.width),
-            height: video.and_then(|v| v.height),
+            // As shown: a phone's portrait clip is stored landscape + rotation.
+            width: video.and_then(|v| v.display_size().0),
+            height: video.and_then(|v| v.display_size().1),
             fps: p.fps(),
             video_codec: video.and_then(|v| v.codec_name.clone()),
             audio_codec: audio.and_then(|a| a.codec_name.clone()),
@@ -580,7 +581,10 @@ impl Engine for MediaEngine {
                 info.path.display()
             )));
         }
-        let src_height = info.height.unwrap_or(0);
+        // Resolution caps apply to the short side (portrait video included).
+        let (w, h) = (info.width.unwrap_or(0), info.height.unwrap_or(0));
+        let portrait = h > w;
+        let src_height = w.min(h);
 
         let target = target_bytes(&opts.goal, info.size_bytes);
         let output = opts
@@ -649,6 +653,7 @@ impl Engine for MediaEngine {
                     // A size target is for sending: make it play everywhere.
                     to_sdr: info.hdr,
                     hardware,
+                    portrait,
                 },
                 Some(predicted),
             )
@@ -674,6 +679,7 @@ impl Engine for MediaEngine {
                         .hdr
                         .filter(|_| hardware && opts.video_codec == VideoCodec::H264),
                     hardware,
+                    portrait,
                 },
                 None,
             )
@@ -731,6 +737,7 @@ fn placeholder_video_spec() -> VideoSpec {
         preset: crate::options::QualityPreset::Balanced,
         to_sdr: None,
         hardware: false,
+        portrait: false,
     }
 }
 
@@ -1284,8 +1291,13 @@ fn build_summary(video: &VideoSpec, audio: Option<&AudioSpec>, two_pass: bool) -
 fn video_filters(video: &VideoSpec, zscale: bool) -> Option<String> {
     const COLORSPACE: &str = "colorspace=all=bt709:iall=bt2020:itrc=bt2020-10:format=yuv420p";
     let mut chain = Vec::new();
+    // The cap is the short side: the width of a portrait video.
     if let Some(h) = video.height {
-        chain.push(format!("scale=-2:{h}"));
+        chain.push(if video.portrait {
+            format!("scale={h}:-2")
+        } else {
+            format!("scale=-2:{h}")
+        });
     }
     match video.to_sdr {
         Some(Hdr::Pq) if zscale => chain.push(
@@ -1998,9 +2010,10 @@ mod tests {
             vf.contains("colorspace=all=bt709") && !vf.contains("zscale"),
             "{vf}"
         );
-        // Downscale first, then convert the fewer pixels.
+        // Downscale first (a portrait clip: by its width), then convert the
+        // fewer pixels.
         assert!(
-            vf.find("scale=-2:").unwrap() < vf.find("colorspace").unwrap(),
+            vf.find("scale=").unwrap() < vf.find("colorspace").unwrap(),
             "{vf}"
         );
         for pair in [
@@ -2119,6 +2132,31 @@ mod tests {
             QualityPreset::Balanced.default_hw_quality(VideoCodec::Av1),
             None
         );
+    }
+
+    #[test]
+    fn a_portrait_video_is_capped_on_its_short_side() {
+        let engine = MediaEngine::new();
+        // As shown (probe applies the rotation): 2160 × 3840, portrait.
+        let info = video_info(60.0, 200_000_000, 2160, 3840, true);
+        let opts = ShrinkOpts {
+            resolution: ResolutionOpt::Height(1080),
+            ..ShrinkOpts::default()
+        };
+        let plan = engine.plan(&info, &opts).unwrap();
+        assert_eq!(plan.spec.video.height, Some(1080));
+        assert!(plan.spec.video.portrait);
+        let args = joined(&plan, PassKind::Single);
+        let vf = &args[args.iter().position(|a| a == "-vf").unwrap() + 1];
+        // 1080 × 1920, not 608 × 1080.
+        assert!(vf.starts_with("scale=1080:-2"), "{vf}");
+
+        // Landscape is unchanged: height is the short side.
+        let info = video_info(60.0, 200_000_000, 3840, 2160, true);
+        let plan = engine.plan(&info, &opts).unwrap();
+        assert!(!plan.spec.video.portrait);
+        let args = joined(&plan, PassKind::Single);
+        assert!(args.iter().any(|a| a.starts_with("scale=-2:1080")));
     }
 
     fn iphone_info() -> MediaInfo {

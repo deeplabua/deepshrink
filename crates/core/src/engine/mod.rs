@@ -178,8 +178,11 @@ pub struct VideoSpec {
     pub bitrate_bps: Option<u64>,
     /// CRF value for quality mode; `None` in bitrate mode.
     pub crf: Option<u8>,
-    /// Downscale target height; `None` keeps the source resolution.
+    /// Downscale target of the *short* side ("1080p" = 1080 px on the short
+    /// side, like phones and sites mean it); `None` keeps the source resolution.
     pub height: Option<u32>,
+    /// The video is shown taller than wide: the short side is its width.
+    pub portrait: bool,
     /// Frame-rate cap; `None` keeps the source rate.
     pub fps: Option<u32>,
     pub preset: QualityPreset,

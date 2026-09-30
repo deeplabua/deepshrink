@@ -52,6 +52,41 @@ pub struct Stream {
     /// Transfer characteristic, e.g. "bt709", "arib-std-b67" (HLG), "smpte2084" (PQ).
     #[serde(default)]
     pub color_transfer: Option<String>,
+    /// Side data — a "Display Matrix" entry carries the rotation a player
+    /// applies (phones store portrait video as a landscape frame + rotation).
+    #[serde(default)]
+    pub side_data_list: Vec<SideData>,
+    /// Stream tags (older files keep the rotation as `rotate`).
+    #[serde(default)]
+    pub tags: HashMap<String, String>,
+}
+
+/// One `side_data_list` entry; only the display rotation is read.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SideData {
+    #[serde(default)]
+    pub rotation: Option<f64>,
+}
+
+impl Stream {
+    /// The rotation players apply, normalised to 0 / 90 / 180 / 270 degrees.
+    pub fn rotation(&self) -> u32 {
+        let deg = self
+            .side_data_list
+            .iter()
+            .find_map(|d| d.rotation)
+            .or_else(|| self.tags.get("rotate").and_then(|r| r.trim().parse().ok()))
+            .unwrap_or(0.0);
+        ((deg.round() as i64).rem_euclid(360) as u32 + 45) / 90 % 4 * 90
+    }
+
+    /// Width × height as shown (a quarter turn swaps them).
+    pub fn display_size(&self) -> (Option<u32>, Option<u32>) {
+        match self.rotation() {
+            90 | 270 => (self.height, self.width),
+            _ => (self.width, self.height),
+        }
+    }
 }
 
 impl Ffprobe {
@@ -193,5 +228,21 @@ mod tests {
     fn ratio_guards_zero_denominator() {
         assert_eq!(parse_ratio("0/0"), None);
         assert_eq!(parse_ratio("30/1"), Some(30.0));
+    }
+
+    #[test]
+    fn a_rotated_phone_video_reports_its_display_size() {
+        let json = r#"{"format": {"duration": "33.0"}, "streams": [
+            {"codec_type": "video", "width": 1024, "height": 576,
+             "side_data_list": [{"side_data_type": "Display Matrix", "rotation": -90}]},
+            {"codec_type": "video", "width": 1920, "height": 1080, "tags": {"rotate": "180"}},
+            {"codec_type": "video", "width": 1920, "height": 1080}
+        ]}"#;
+        let p: Ffprobe = serde_json::from_str(json).unwrap();
+        assert_eq!(p.streams[0].rotation(), 270);
+        assert_eq!(p.streams[0].display_size(), (Some(576), Some(1024)));
+        assert_eq!(p.streams[1].rotation(), 180);
+        assert_eq!(p.streams[1].display_size(), (Some(1920), Some(1080)));
+        assert_eq!(p.streams[2].display_size(), (Some(1920), Some(1080)));
     }
 }
