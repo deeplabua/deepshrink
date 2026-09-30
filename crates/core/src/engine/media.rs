@@ -11,12 +11,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    AudioSpec, EncodePlan, EncodeSpec, Engine, EngineError, MediaInfo, Outcome, ShrinkOpts,
-    SizeGoal, VideoSpec,
+    AudioSpec, CaptureMeta, EncodePlan, EncodeSpec, Engine, EngineError, MediaInfo, Outcome,
+    ShrinkOpts, SizeGoal, VideoSpec,
 };
 use crate::budget;
 use crate::detect::{detect_kind, MediaKind};
-use crate::options::{AudioChoice, AudioCodec, FpsOpt, QualityPreset, ResolutionOpt};
+use crate::options::{AudioChoice, AudioCodec, FpsOpt, QualityPreset, ResolutionOpt, VideoCodec};
 
 /// Audio bitrate ladder (bits/s, descending) tried when keeping a track under
 /// a tight size budget.
@@ -444,6 +444,7 @@ impl MediaEngine {
                 audio_only: true,
                 dpi: None,
                 keep_metadata: opts.keep_metadata,
+                tags: capture_tags(info, opts.keep_metadata),
             },
             // A size target is its own guarantee; quality mode gets the guard.
             guard_larger: target.is_none() && !opts.allow_larger,
@@ -480,6 +481,7 @@ impl Engine for MediaEngine {
             audio_codec: audio.and_then(|a| a.codec_name.clone()),
             audio_channels: audio.and_then(|a| a.channels),
             audio_bitrate_bps: p.audio_bitrate_bps(),
+            capture: capture_meta(&p),
         })
     }
 
@@ -507,7 +509,7 @@ impl Engine for MediaEngine {
         let output = opts
             .output
             .clone()
-            .unwrap_or_else(|| output_with_ext(&info.path, "mp4"));
+            .unwrap_or_else(|| output_with_ext(&info.path, video_container(info, target, opts)));
 
         // "Never make it bigger": if the source already fits the target, just
         // remux (stream copy) instead of re-encoding it up to the target. The
@@ -604,6 +606,7 @@ impl Engine for MediaEngine {
                 audio_only: false,
                 dpi: None,
                 keep_metadata: opts.keep_metadata,
+                tags: capture_tags(info, opts.keep_metadata),
             },
             // A size target is its own guarantee; quality mode gets the guard.
             guard_larger: target.is_none() && !opts.allow_larger,
@@ -656,6 +659,7 @@ fn passthrough_plan(
             audio_only: false,
             dpi: None,
             keep_metadata,
+            tags: capture_tags(info, keep_metadata),
         },
         guard_larger: false,
     }
@@ -703,27 +707,145 @@ fn copy_mtime(input: &Path, output: &Path) {
     }
 }
 
-/// Containers whose muxer understands `-movflags` (MP4 / QuickTime family).
-fn is_mov_family(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("mp4" | "m4v" | "m4a" | "mov")
-    )
+/// Output container for a video. A QuickTime source (an iPhone `.MOV`) stays
+/// QuickTime in quality mode: only a MOV carries its location / camera tags in
+/// a form Apple's apps read (the MP4 muxer drops them). Size targets and
+/// platform presets get MP4 — the most compatible for sharing. AV1 is always
+/// MP4 (QuickTime has no AV1 mapping).
+fn video_container(info: &MediaInfo, target: Option<u64>, opts: &ShrinkOpts) -> &'static str {
+    let mov_source = info
+        .path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("mov"));
+    if mov_source && target.is_none() && opts.video_codec != VideoCodec::Av1 {
+        "mov"
+    } else {
+        "mp4"
+    }
 }
 
-/// Metadata flags for the output: keep = map the source's global metadata and
-/// (MP4/MOV) write QuickTime keys too — iPhone location/make/model live there
-/// and the plain MP4 muxer drops them; strip = drop all global metadata.
-fn metadata_args(plan: &EncodePlan) -> (Vec<OsString>, Option<&'static str>) {
-    if plan.spec.keep_metadata {
-        let flag = is_mov_family(&plan.output).then_some("+use_metadata_tags");
-        (vec!["-map_metadata".into(), "0".into()], flag)
-    } else {
-        (vec!["-map_metadata".into(), "-1".into()], None)
+/// Read the capture metadata from the probe's container tags.
+fn capture_meta(p: &deepshrink_ffmpeg::Ffprobe) -> CaptureMeta {
+    let tag = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| p.format_tag(k))
+            .map(str::to_string)
+    };
+    let created_local = tag(&["com.apple.quicktime.creationdate"]);
+    let created_utc = created_local
+        .as_deref()
+        .and_then(to_utc)
+        .or_else(|| tag(&["creation_time"]));
+    CaptureMeta {
+        created_utc,
+        created_local,
+        location: tag(&["com.apple.quicktime.location.ISO6709", "location"]),
+        make: tag(&["com.apple.quicktime.make", "make"]),
+        model: tag(&["com.apple.quicktime.model", "model"]),
     }
+}
+
+/// The explicit output tags for `info`'s capture metadata (empty when
+/// metadata is stripped).
+fn capture_tags(info: &MediaInfo, keep: bool) -> Vec<(String, String)> {
+    if !keep {
+        return Vec::new();
+    }
+    let c = &info.capture;
+    [
+        ("creation_time", c.created_utc.as_ref()),
+        ("date", c.created_local.as_ref()),
+        ("location", c.location.as_ref()),
+        ("make", c.make.as_ref()),
+        ("model", c.model.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(k, v)| v.map(|v| (k.to_string(), v.clone())))
+    .collect()
+}
+
+/// `2026-09-26T20:01:54+0300` (also `+03:00`, `Z`, fractional seconds) →
+/// `2026-09-26T17:01:54Z`. `None` if it doesn't parse.
+fn to_utc(s: &str) -> Option<String> {
+    let s = s.trim();
+    let num = |a: usize, b: usize| s.get(a..b)?.parse::<i64>().ok();
+    let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (h, mi, se) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    if s.get(4..5)? != "-" || s.get(10..11).map(|c| c == "T" || c == " ") != Some(true) {
+        return None;
+    }
+    // Offset: skip any fraction, then Z / ±HH[:]MM.
+    let rest = s
+        .get(19..)?
+        .trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    let offset_min = match rest {
+        "" | "Z" | "z" => 0,
+        r if r.starts_with('+') || r.starts_with('-') => {
+            let digits: String = r[1..].chars().filter(char::is_ascii_digit).collect();
+            let (oh, om) = (
+                digits.get(0..2)?.parse::<i64>().ok()?,
+                digits.get(2..4).unwrap_or("00").parse::<i64>().ok()?,
+            );
+            let m = oh * 60 + om;
+            if r.starts_with('-') {
+                -m
+            } else {
+                m
+            }
+        }
+        _ => return None,
+    };
+    let secs = days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + se - offset_min * 60;
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let (y, mo, d) = civil_from_days(days);
+    Some(format!(
+        "{y:04}-{mo:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    ))
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian date (H. Hinnant).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Inverse of [`days_from_civil`].
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// Metadata flags for the output. Keep = map the source's global metadata,
+/// then re-state the capture tags explicitly (`-metadata k=v`): ffmpeg's own
+/// copy of an iPhone's `com.apple.quicktime.*` keys (`use_metadata_tags`) is
+/// not readable by Apple's frameworks, whereas `location` / `make` / `model` /
+/// `date` land in QuickTime user data (©xyz, ©mak, …) that Photos and Finder
+/// read, and `creation_time` sets the movie header. Strip = drop it all.
+fn metadata_args(plan: &EncodePlan) -> (Vec<OsString>, Option<&'static str>) {
+    if !plan.spec.keep_metadata {
+        return (vec!["-map_metadata".into(), "-1".into()], None);
+    }
+    let mut a: Vec<OsString> = vec!["-map_metadata".into(), "0".into()];
+    for (k, v) in &plan.spec.tags {
+        a.push("-metadata".into());
+        a.push(format!("{k}={v}").into());
+    }
+    (a, None)
 }
 
 /// `-movflags` value combining faststart and metadata tags (None = no flag).
@@ -1219,6 +1341,7 @@ mod tests {
             audio_codec: if audio { Some("aac".into()) } else { None },
             audio_channels: if audio { Some(2) } else { None },
             audio_bitrate_bps: None,
+            capture: CaptureMeta::default(),
         }
     }
 
@@ -1411,6 +1534,7 @@ mod tests {
             audio_codec: Some("pcm_s16le".into()),
             audio_channels: Some(channels),
             audio_bitrate_bps: None,
+            capture: CaptureMeta::default(),
         }
     }
 
@@ -1585,21 +1709,40 @@ mod tests {
             .collect()
     }
 
+    fn iphone_info() -> MediaInfo {
+        let mut info = video_info(60.0, 50_000_000, 2160, 3840, true);
+        info.path = PathBuf::from("/tmp/IMG_3325.MOV");
+        info.capture = CaptureMeta {
+            created_utc: to_utc("2026-09-26T20:01:54+0300"),
+            created_local: Some("2026-09-26T20:01:54+0300".into()),
+            location: Some("+50.4160+030.2796+155.635/".into()),
+            make: Some("Apple".into()),
+            model: Some("iPhone 12 Pro Max".into()),
+        };
+        info
+    }
+
     #[test]
     fn metadata_is_kept_by_default_and_strippable() {
-        let info = video_info(60.0, 50_000_000, 1920, 1080, true);
+        let info = iphone_info();
         let plan = MediaEngine::new()
             .plan(&info, &ShrinkOpts::default())
             .unwrap();
         let a = joined(&plan, PassKind::Single);
         let at = a.iter().position(|x| x == "-map_metadata").unwrap();
         assert_eq!(a[at + 1], "0");
-        // One -movflags carrying both faststart and the QuickTime keys (iPhone
-        // location / make / model live there; plain MP4 drops them).
-        assert!(
-            a.contains(&"+faststart+use_metadata_tags".to_string()),
-            "{a:?}"
-        );
+        // The capture tags are re-stated explicitly — the shooting date (not
+        // the file's export time) in UTC, and location / make / model.
+        for tag in [
+            "creation_time=2026-09-26T17:01:54Z",
+            "location=+50.4160+030.2796+155.635/",
+            "make=Apple",
+            "model=iPhone 12 Pro Max",
+            "date=2026-09-26T20:01:54+0300",
+        ] {
+            assert!(a.contains(&tag.to_string()), "{tag} in {a:?}");
+        }
+        assert!(a.contains(&"+faststart".to_string()));
 
         let strip = ShrinkOpts {
             keep_metadata: false,
@@ -1609,7 +1752,58 @@ mod tests {
         let a = joined(&plan, PassKind::Single);
         let at = a.iter().position(|x| x == "-map_metadata").unwrap();
         assert_eq!(a[at + 1], "-1");
+        assert!(!a.iter().any(|x| x.starts_with("location=")));
         assert!(a.contains(&"+faststart".to_string()));
+    }
+
+    #[test]
+    fn apple_local_time_converts_to_utc() {
+        let utc = |s: &str| to_utc(s);
+        assert_eq!(
+            utc("2026-09-26T20:01:54+0300").as_deref(),
+            Some("2026-09-26T17:01:54Z")
+        );
+        assert_eq!(
+            utc("2026-09-26T20:01:54+03:00").as_deref(),
+            Some("2026-09-26T17:01:54Z")
+        );
+        assert_eq!(
+            utc("2026-01-01T01:30:00+0300").as_deref(),
+            Some("2025-12-31T22:30:00Z")
+        );
+        assert_eq!(
+            utc("2026-03-01T23:00:00-0500").as_deref(),
+            Some("2026-03-02T04:00:00Z")
+        );
+        assert_eq!(
+            utc("2024-02-29T12:00:00.123Z").as_deref(),
+            Some("2024-02-29T12:00:00Z")
+        );
+        assert_eq!(utc("yesterday"), None);
+    }
+
+    #[test]
+    fn an_iphone_mov_stays_mov_in_quality_mode_only() {
+        let info = iphone_info();
+        let out = |opts: &ShrinkOpts| {
+            let plan = MediaEngine::new().plan(&info, opts).unwrap();
+            plan.output.to_string_lossy().into_owned()
+        };
+        assert!(out(&ShrinkOpts::default()).ends_with(".shrink.mov"));
+        // Platform presets / size targets are for sharing → MP4.
+        assert!(out(&opts_target(8_000_000)).ends_with(".shrink.mp4"));
+        // AV1 has no QuickTime mapping → MP4.
+        let av1 = ShrinkOpts {
+            video_codec: VideoCodec::Av1,
+            ..ShrinkOpts::default()
+        };
+        assert!(out(&av1).ends_with(".shrink.mp4"));
+        // Non-MOV sources are unaffected.
+        let mp4 = video_info(60.0, 50_000_000, 1920, 1080, true);
+        let p = MediaEngine::new()
+            .plan(&mp4, &ShrinkOpts::default())
+            .unwrap();
+        assert!(p.output.to_string_lossy().ends_with(".shrink.mp4"));
     }
 
     #[test]

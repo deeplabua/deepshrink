@@ -32,6 +32,26 @@ pub struct MediaInfo {
     /// Bit rate of the (first) audio stream in bits/s, when the probe reports
     /// it — the ceiling for re-encoding a video's audio track.
     pub audio_bitrate_bps: Option<u64>,
+    /// When / where / with what it was shot (container tags), carried over to
+    /// the output when metadata is kept.
+    pub capture: CaptureMeta,
+}
+
+/// Capture metadata read from the source's container tags. iPhone videos keep
+/// these as `com.apple.quicktime.*` keys; others use plain `location` / `make`
+/// / `model` / `creation_time`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CaptureMeta {
+    /// When it was shot, UTC ISO-8601 (`2026-09-26T17:01:54Z`): Apple's
+    /// `creationdate` (local time + offset) when present — the container's
+    /// `creation_time` can be the moment the file was exported or AirDropped.
+    pub created_utc: Option<String>,
+    /// The original local timestamp as written (`2026-09-26T20:01:54+0300`).
+    pub created_local: Option<String>,
+    /// ISO 6709 location (`+50.4160+030.2796+155.635/`).
+    pub location: Option<String>,
+    pub make: Option<String>,
+    pub model: Option<String>,
 }
 
 impl MediaInfo {
@@ -180,6 +200,10 @@ pub struct EncodeSpec {
     pub dpi: Option<u32>,
     /// Copy metadata + mtime from the source (see [`ShrinkOpts::keep_metadata`]).
     pub keep_metadata: bool,
+    /// Explicit container tags written to the output (`creation_time`,
+    /// `location`, `make`, `model`, `date`) — the capture metadata re-stated
+    /// in the form Apple's readers (Photos, Finder) actually understand.
+    pub tags: Vec<(String, String)>,
 }
 
 /// The encode plan — the result of [`Engine::plan`]. Usable for `--dry-run`.

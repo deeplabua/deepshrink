@@ -1,7 +1,9 @@
-//! End-to-end: metadata survives a re-encode by default (QuickTime keys an
-//! iPhone writes — location, make, model — plus creation time and the file's
-//! mtime), `--strip-metadata` removes it, and a folder `--dry-run` ends with a
-//! predicted total. Requires ffmpeg/ffprobe; skips gracefully without them.
+//! End-to-end: an iPhone-style .MOV keeps its capture metadata by default —
+//! the shooting date (from Apple's `creationdate`, not the export-time
+//! `creation_time`), location, make, model — and its mtime; the output stays a
+//! MOV so Apple's frameworks read it (checked through AVFoundation on macOS,
+//! the way Photos / Finder see it). `--strip-metadata` removes it, and a folder
+//! `--dry-run` ends with a predicted total. Requires ffmpeg/ffprobe.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -45,7 +47,12 @@ fn iphone_like(path: &Path) -> SystemTime {
             "aac",
             "-shortest",
         ])
-        .args(["-metadata", "creation_time=2025-06-01T10:20:30Z"])
+        // Export time differs from the shooting date — like an AirDropped clip.
+        .args(["-metadata", "creation_time=2025-06-03T09:00:00Z"])
+        .args([
+            "-metadata",
+            "com.apple.quicktime.creationdate=2025-06-01T13:20:30+0300",
+        ])
         .args([
             "-metadata",
             "com.apple.quicktime.location.ISO6709=+50.4501+030.5234+170.000/",
@@ -104,14 +111,17 @@ fn metadata_and_mtime_survive_unless_stripped() {
     let s = src.to_str().unwrap();
 
     shrink(&[s]);
-    let out = d.join("IMG_0001.shrink.mp4");
+    let out = d.join("IMG_0001.shrink.mov");
     let t = tags(&out);
     assert!(t.contains("+50.4501+030.5234"), "location kept:\n{t}");
     assert!(t.contains("iPhone 14 Pro Max"), "model kept:\n{t}");
+    // The shooting date (13:20 +03:00 → 10:20 UTC), not the export time.
     assert!(
-        t.contains("creation_time=2025-06-01"),
-        "creation time kept:\n{t}"
+        t.contains("creation_time=2025-06-01T10:20:30"),
+        "shooting date kept:\n{t}"
     );
+    #[cfg(target_os = "macos")]
+    assert_apple_reads(&out);
     let mtime = std::fs::metadata(&out).unwrap().modified().unwrap();
     let drift = mtime.duration_since(past).unwrap_or_else(|e| e.duration());
     assert!(
@@ -148,4 +158,43 @@ fn a_folder_dry_run_ends_with_a_predicted_total() {
     assert!(stdout.contains("Dry run. 2 file(s)"), "{stdout}");
     assert!(stdout.contains(" → ~"), "{stdout}");
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// What Photos / Finder see: AVFoundation's common metadata of the output.
+/// Skips quietly if `swift` isn't available.
+#[cfg(target_os = "macos")]
+fn assert_apple_reads(path: &Path) {
+    let script = path.with_file_name("read.swift");
+    std::fs::write(
+        &script,
+        r#"import AVFoundation
+let a = AVURLAsset(url: URL(fileURLWithPath: CommandLine.arguments[1]))
+let sem = DispatchSemaphore(value: 0)
+Task {
+  for i in (try? await a.load(.commonMetadata)) ?? [] {
+    print("\(i.commonKey?.rawValue ?? "?")=\((try? await i.load(.stringValue)) ?? "-")")
+  }
+  sem.signal()
+}
+sem.wait()
+"#,
+    )
+    .unwrap();
+    let Ok(out) = Command::new("swift").arg(&script).arg(path).output() else {
+        eprintln!("skipping AVFoundation check: swift not available");
+        return;
+    };
+    let seen = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        seen.contains("location=+50.4501+030.5234"),
+        "AVFoundation location:\n{seen}"
+    );
+    assert!(
+        seen.contains("model=iPhone 14 Pro Max"),
+        "AVFoundation model:\n{seen}"
+    );
+    assert!(
+        seen.contains("creationDate=2025-06-01T13:20:30+0300"),
+        "AVFoundation date:\n{seen}"
+    );
 }

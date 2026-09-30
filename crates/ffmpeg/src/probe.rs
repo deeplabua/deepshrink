@@ -4,6 +4,7 @@
 //! Mapping into the core `MediaInfo` type happens in `deepshrink-core` so this
 //! crate stays free of a dependency on core.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
@@ -29,6 +30,9 @@ pub struct Format {
     pub size: Option<String>,
     /// Overall bit rate in bits/s, as a string.
     pub bit_rate: Option<String>,
+    /// Container-level tags (`creation_time`, `com.apple.quicktime.*`, …).
+    #[serde(default)]
+    pub tags: HashMap<String, String>,
 }
 
 /// A single stream (video or audio).
@@ -73,6 +77,16 @@ impl Ffprobe {
         self.streams
             .iter()
             .find(|s| s.codec_type.as_deref() == Some("audio"))
+    }
+
+    /// A container tag by key (case-insensitive — muxers differ).
+    pub fn format_tag(&self, key: &str) -> Option<&str> {
+        self.format
+            .tags
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.as_str())
+            .filter(|v| !v.trim().is_empty())
     }
 
     /// Bit rate of the first audio stream in bits/s, if reported.
