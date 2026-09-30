@@ -76,6 +76,8 @@ Preview the plan without encoding, or batch a whole folder:
 
 ```sh
 deepshrink big.mp4 --target 8MB --dry-run
+deepshrink clip.mp4 --dry-run            # quality mode: size predicted from quick samples
+deepshrink ./clips --recursive --dry-run # ends with the folder's predicted total
 deepshrink ./clips --recursive --for telegram
 ```
 
@@ -104,6 +106,16 @@ of those encoders, and DeepShrink says so plainly if neither is present. `--mono
 the audio to one channel — useful for speech — and applies to a video's audio track as well
 as to a pure-audio input.
 
+Metadata — shooting date, location, camera — is carried over so Photos and Finder show
+the same place and date as the original, and the result keeps the original's modification
+time; pass `--strip-metadata` to drop it. An iPhone `.MOV` stays `.mov` in quality mode
+(QuickTime is where Apple's apps read location); size targets and presets produce `.mp4`.
+A video's audio track is never re-encoded above its own bitrate.
+
+HDR (iPhone HLG, HDR10) is kept as shot in quality mode. A size target or platform preset
+is for sending, so there it becomes 8-bit SDR that every phone, browser and chat app
+plays.
+
 The original file is never modified — DeepShrink writes a new `*.shrink.*` file unless
 you pass `--overwrite`.
 
@@ -125,6 +137,10 @@ Platform limits change over time — verify against the current service.
 bitrate that fits the target (minus container overhead), then runs a **two-pass** encode
 for video, or picks a codec bitrate for audio. If the result overshoots the target, it
 corrects once. Run with `--dry-run` to see the plan first.
+
+**A target is a ceiling, not a quota.** When the quality preset alone lands well under the
+target (predicted from short sample encodes), that's what you get — a 2-second clip for
+Discord doesn't become 8 MB just because it could.
 
 **Never bigger.** Without a size target (quality mode) DeepShrink won't hand back a file
 that isn't smaller: re-encoding an already-compact file only loses quality. Video is
