@@ -13,7 +13,7 @@ pub mod size;
 
 pub use detect::{detect_kind, MediaKind};
 pub use engine::{
-    media::MediaEngine, AudioSpec, CaptureMeta, EncodePlan, EncodeSpec, Engine, EngineError,
+    media::MediaEngine, AudioSpec, CaptureMeta, EncodePlan, EncodeSpec, Engine, EngineError, Hdr,
     MediaInfo, Outcome, ShrinkOpts, SizeGoal, VideoSpec,
 };
 pub use options::{AudioChoice, AudioCodec, FpsOpt, QualityPreset, ResolutionOpt, VideoCodec};

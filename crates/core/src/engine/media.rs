@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    AudioSpec, CaptureMeta, EncodePlan, EncodeSpec, Engine, EngineError, MediaInfo, Outcome,
+    AudioSpec, CaptureMeta, EncodePlan, EncodeSpec, Engine, EngineError, Hdr, MediaInfo, Outcome,
     ShrinkOpts, SizeGoal, VideoSpec,
 };
 use crate::budget;
@@ -62,12 +62,20 @@ impl MediaEngine {
     ) -> Result<Outcome, EngineError> {
         let tools = deepshrink_ffmpeg::locate()?;
         let encoder = resolve_encoder(&tools, plan)?;
+        let zscale = wants_zscale(&tools, plan);
 
         // VMAF-targeted quality search: applies to CRF-mode video only. Size /
         // audio / passthrough encodes keep their existing single path.
         if let Some(target_vmaf) = plan.target_vmaf {
             if plan.spec.video.crf.is_some() && !plan.spec.audio_only && !plan.spec.passthrough {
-                return self.run_crf_search(&tools, plan, encoder, target_vmaf, on_progress);
+                return self.run_crf_search(
+                    &tools,
+                    plan,
+                    encoder,
+                    zscale,
+                    target_vmaf,
+                    on_progress,
+                );
             }
         }
 
@@ -85,14 +93,29 @@ impl MediaEngine {
             && !plan.spec.audio_only
             && plan.spec.video.crf.is_some()
         {
-            if let Some(predicted) = predict_crf_bytes(&tools, plan, encoder) {
+            if let Some(predicted) = predict_crf_bytes(&tools, plan, encoder, zscale) {
                 if predicted >= source {
                     return self.keep_original(&tools, plan, on_progress);
                 }
             }
         }
 
-        let mut outcome = self.run_plain(&tools, plan, encoder, on_progress)?;
+        // A size target is a ceiling, not a quota: when the quality preset's
+        // CRF comfortably fits, encode at it instead of filling the budget.
+        let ceiling = match ceiling_fit(&tools, plan, encoder, zscale) {
+            Some((ceiling, _)) => {
+                let o = self.run_plain(&tools, &ceiling, encoder, zscale, on_progress)?;
+                // Predictions are ±5%; a miss falls back to the budgeted encode.
+                plan.target_bytes
+                    .is_some_and(|t| o.final_bytes <= t)
+                    .then_some(o)
+            }
+            None => None,
+        };
+        let mut outcome = match ceiling {
+            Some(o) => o,
+            None => self.run_plain(&tools, plan, encoder, zscale, on_progress)?,
+        };
         if source > 0 && outcome.final_bytes >= source {
             let _ = fs::remove_file(&outcome.output);
             return self.keep_original(&tools, plan, on_progress);
@@ -113,6 +136,7 @@ impl MediaEngine {
         tools: &deepshrink_ffmpeg::Tools,
         plan: &EncodePlan,
         encoder: &str,
+        zscale: bool,
         on_progress: &mut dyn FnMut(PassKind, f64),
     ) -> Result<Outcome, EngineError> {
         let passlog = passlog_base(plan);
@@ -123,16 +147,16 @@ impl MediaEngine {
         }
 
         if plan.spec.two_pass {
-            let args1 = build_pass_args(plan, PassKind::First, &passlog, encoder);
+            let args1 = build_pass_args(plan, PassKind::First, &passlog, encoder, zscale);
             deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args1, total, &mut |f| {
                 on_progress(PassKind::First, f)
             })?;
-            let args2 = build_pass_args(plan, PassKind::Second, &passlog, encoder);
+            let args2 = build_pass_args(plan, PassKind::Second, &passlog, encoder, zscale);
             deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args2, total, &mut |f| {
                 on_progress(PassKind::Second, f)
             })?;
         } else {
-            let args = build_pass_args(plan, PassKind::Single, &passlog, encoder);
+            let args = build_pass_args(plan, PassKind::Single, &passlog, encoder, zscale);
             deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, total, &mut |f| {
                 on_progress(PassKind::Single, f)
             })?;
@@ -148,7 +172,7 @@ impl MediaEngine {
                 if corrected >= budget::ABSOLUTE_MIN_VIDEO_BPS {
                     let mut retry = plan.clone();
                     retry.spec.video.bitrate_bps = Some(corrected);
-                    let args = build_pass_args(&retry, PassKind::Second, &passlog, encoder);
+                    let args = build_pass_args(&retry, PassKind::Second, &passlog, encoder, zscale);
                     deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, total, &mut |f| {
                         on_progress(PassKind::Second, f)
                     })?;
@@ -176,6 +200,14 @@ impl MediaEngine {
         if plan.spec.passthrough {
             return Ok(fs::metadata(&plan.input).ok().map(|m| m.len()));
         }
+        if ceiling_plan(plan).is_some() {
+            // A size target: the budget, or less when the quality CRF fits.
+            let tools = deepshrink_ffmpeg::locate()?;
+            let encoder = resolve_encoder(&tools, plan)?;
+            let zscale = wants_zscale(&tools, plan);
+            let fit = ceiling_fit(&tools, plan, encoder, zscale).map(|(_, bytes)| bytes);
+            return Ok(fit.or(plan.expected_bytes));
+        }
         if let Some(bytes) = plan.expected_bytes {
             return Ok(Some(bytes));
         }
@@ -184,7 +216,8 @@ impl MediaEngine {
         }
         let tools = deepshrink_ffmpeg::locate()?;
         let encoder = resolve_encoder(&tools, plan)?;
-        Ok(predict_crf_bytes(&tools, plan, encoder))
+        let zscale = wants_zscale(&tools, plan);
+        Ok(predict_crf_bytes(&tools, plan, encoder, zscale))
     }
 
     /// The guard fired: deliver the source as-is (a byte copy, in its own
@@ -227,7 +260,7 @@ impl MediaEngine {
         on_progress: &mut dyn FnMut(PassKind, f64),
     ) -> Result<Outcome, EngineError> {
         // Stream copy — the video encoder is never reached.
-        let args = build_pass_args(plan, PassKind::Single, "", "copy");
+        let args = build_pass_args(plan, PassKind::Single, "", "copy", false);
         let remuxed =
             deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, plan.source_duration_sec, &mut |f| {
                 on_progress(PassKind::Single, f)
@@ -256,12 +289,13 @@ impl MediaEngine {
         tools: &deepshrink_ffmpeg::Tools,
         plan: &EncodePlan,
         encoder: &str,
+        zscale: bool,
         target_vmaf: f64,
         on_progress: &mut dyn FnMut(PassKind, f64),
     ) -> Result<Outcome, EngineError> {
         let (ref_w, ref_h) = match (plan.source_width, plan.source_height) {
             (Some(w), Some(h)) => (w, h),
-            _ => return self.run_plain(tools, plan, encoder, on_progress),
+            _ => return self.run_plain(tools, plan, encoder, zscale, on_progress),
         };
         let ref_fps = plan.source_fps.unwrap_or(0.0);
         let total = plan.source_duration_sec;
@@ -275,19 +309,21 @@ impl MediaEngine {
             if err.is_some() {
                 return f64::NEG_INFINITY;
             }
-            match encode_at_crf(tools, plan, encoder, crf, total, on_progress).and_then(|()| {
-                last_crf = Some(crf);
-                deepshrink_ffmpeg::measure_vmaf(
-                    &tools.ffmpeg,
-                    &plan.output,
-                    &plan.input,
-                    ref_w,
-                    ref_h,
-                    ref_fps,
-                    n_threads,
-                )
-                .map_err(EngineError::from)
-            }) {
+            match encode_at_crf(tools, plan, encoder, zscale, crf, total, on_progress).and_then(
+                |()| {
+                    last_crf = Some(crf);
+                    deepshrink_ffmpeg::measure_vmaf(
+                        &tools.ffmpeg,
+                        &plan.output,
+                        &plan.input,
+                        ref_w,
+                        ref_h,
+                        ref_fps,
+                        n_threads,
+                    )
+                    .map_err(EngineError::from)
+                },
+            ) {
                 Ok(v) => v,
                 Err(e) => {
                     err = Some(e);
@@ -301,7 +337,7 @@ impl MediaEngine {
 
         // Leave the chosen CRF on disk (the search may have ended elsewhere).
         if last_crf != Some(chosen_crf) {
-            encode_at_crf(tools, plan, encoder, chosen_crf, total, on_progress)?;
+            encode_at_crf(tools, plan, encoder, zscale, chosen_crf, total, on_progress)?;
         }
         let size = fs::metadata(&plan.output)?.len();
         Ok(Outcome {
@@ -448,6 +484,7 @@ impl MediaEngine {
             },
             // A size target is its own guarantee; quality mode gets the guard.
             guard_larger: target.is_none() && !opts.allow_larger,
+            ceiling_crf: None,
         })
     }
 }
@@ -482,6 +519,9 @@ impl Engine for MediaEngine {
             audio_channels: audio.and_then(|a| a.channels),
             audio_bitrate_bps: p.audio_bitrate_bps(),
             capture: capture_meta(&p),
+            hdr: video
+                .and_then(|v| v.color_transfer.as_deref())
+                .and_then(Hdr::from_transfer),
         })
     }
 
@@ -556,6 +596,8 @@ impl Engine for MediaEngine {
                     height,
                     fps: pick_fps(opts.fps, info.fps),
                     preset: opts.quality,
+                    // A size target is for sending: make it play everywhere.
+                    to_sdr: info.hdr,
                 },
                 Some(predicted),
             )
@@ -575,6 +617,8 @@ impl Engine for MediaEngine {
                     height,
                     fps: pick_fps(opts.fps, info.fps),
                     preset: opts.quality,
+                    // Quality mode keeps HDR (and 10-bit) as shot.
+                    to_sdr: None,
                 },
                 None,
             )
@@ -610,6 +654,7 @@ impl Engine for MediaEngine {
             },
             // A size target is its own guarantee; quality mode gets the guard.
             guard_larger: target.is_none() && !opts.allow_larger,
+            ceiling_crf: target.map(|_| opts.quality.default_crf(opts.video_codec)),
         })
     }
 
@@ -627,6 +672,7 @@ fn placeholder_video_spec() -> VideoSpec {
         height: None,
         fps: None,
         preset: crate::options::QualityPreset::Balanced,
+        to_sdr: None,
     }
 }
 
@@ -662,6 +708,7 @@ fn passthrough_plan(
             tags: capture_tags(info, keep_metadata),
         },
         guard_larger: false,
+        ceiling_crf: None,
     }
 }
 
@@ -860,6 +907,50 @@ fn movflags(faststart: bool, meta: Option<&'static str>) -> Option<String> {
     (!v.is_empty()).then_some(v)
 }
 
+/// How far under the target a predicted CRF encode must land to be used
+/// instead of the budget (predictions are within ~5%).
+const CEILING_MARGIN: f64 = 0.9;
+
+/// A size-target plan re-cast as a single-pass CRF encode at the quality
+/// preset's CRF ([`EncodePlan::ceiling_crf`]). `None` for anything else.
+fn ceiling_plan(plan: &EncodePlan) -> Option<EncodePlan> {
+    let crf = plan.ceiling_crf?;
+    if plan.target_bytes.is_none()
+        || plan.spec.passthrough
+        || plan.spec.audio_only
+        || plan.spec.video.bitrate_bps.is_none()
+    {
+        return None;
+    }
+    let mut c = plan.clone();
+    c.spec.video.bitrate_bps = None;
+    c.spec.video.crf = Some(crf);
+    c.spec.two_pass = false;
+    c.summary = build_summary(&c.spec.video, c.spec.audio.as_ref(), false);
+    Some(c)
+}
+
+/// [`ceiling_plan`] and its predicted size, if sample encodes say it lands
+/// comfortably under the target (the same ~2–3 s of samples as the
+/// quality-mode preview).
+fn ceiling_fit(
+    tools: &deepshrink_ffmpeg::Tools,
+    plan: &EncodePlan,
+    encoder: &str,
+    zscale: bool,
+) -> Option<(EncodePlan, u64)> {
+    let target = plan.target_bytes?;
+    let ceiling = ceiling_plan(plan)?;
+    let predicted = predict_crf_bytes(tools, &ceiling, encoder, zscale)?;
+    ((predicted as f64) < target as f64 * CEILING_MARGIN).then_some((ceiling, predicted))
+}
+
+/// Whether to tone-map with `zscale` — asked of ffmpeg only for a PQ source.
+fn wants_zscale(tools: &deepshrink_ffmpeg::Tools, plan: &EncodePlan) -> bool {
+    plan.spec.video.to_sdr == Some(Hdr::Pq)
+        && deepshrink_ffmpeg::has_filter(&tools.ffmpeg, "zscale")
+}
+
 /// Sample windows for [`predict_crf_bytes`]: three 3-second clips at 20/50/80%.
 const SAMPLE_SECS: f64 = 3.0;
 /// Each sample starts on a keyframe, so samples over-predict by ~8–10% (a
@@ -873,6 +964,7 @@ fn predict_crf_bytes(
     tools: &deepshrink_ffmpeg::Tools,
     plan: &EncodePlan,
     encoder: &str,
+    zscale: bool,
 ) -> Option<u64> {
     let duration = plan.source_duration_sec;
     if !duration.is_finite() || duration <= 0.0 {
@@ -899,7 +991,7 @@ fn predict_crf_bytes(
     for (i, &(start, len)) in windows.iter().enumerate() {
         sample.output =
             std::env::temp_dir().join(format!("deepshrink-sample-{}-{i}.mp4", std::process::id()));
-        let mut args = build_pass_args(&sample, PassKind::Single, "", encoder);
+        let mut args = build_pass_args(&sample, PassKind::Single, "", encoder, zscale);
         let at_input = args.iter().position(|a| a == "-i")?;
         args.splice(
             at_input..at_input,
@@ -1052,7 +1144,7 @@ fn output_with_ext(input: &Path, ext: &str) -> PathBuf {
 fn build_summary(video: &VideoSpec, audio: Option<&AudioSpec>, two_pass: bool) -> String {
     let mut parts = vec![video.codec.label().to_string()];
     match (video.bitrate_bps, video.crf) {
-        (Some(bps), _) => parts.push(format!("{} kbps video", bps / 1000)),
+        (Some(bps), _) => parts.push(format!("up to {} kbps video", bps / 1000)),
         (_, Some(crf)) => parts.push(format!("CRF {crf}")),
         _ => {}
     }
@@ -1067,8 +1159,37 @@ fn build_summary(video: &VideoSpec, audio: Option<&AudioSpec>, two_pass: bool) -
     if let Some(f) = video.fps {
         parts.push(format!("{f} fps"));
     }
+    if video.to_sdr.is_some() {
+        parts.push("HDR → SDR".to_string());
+    }
     parts.push(if two_pass { "two-pass" } else { "CRF" }.to_string());
     parts.join(" · ")
+}
+
+/// The `-vf` chain: downscale first (fewer pixels to convert), then HDR → SDR.
+///
+/// HLG (phones) was designed to stay watchable as SDR: `colorspace` re-maps
+/// BT.2020 → BT.709 reading the HLG curve as the BT.2020 gamma — side by side
+/// with an iPhone clip it's the closest match to what macOS itself shows, and
+/// it works in every ffmpeg build. PQ (HDR10) needs a real tone-map, which
+/// takes `zscale` (libzimg — in the app's bundled ffmpeg, not in every build);
+/// without it PQ falls back to `colorspace` too: flatter, but 8-bit SDR that plays.
+fn video_filters(video: &VideoSpec, zscale: bool) -> Option<String> {
+    const COLORSPACE: &str = "colorspace=all=bt709:iall=bt2020:itrc=bt2020-10:format=yuv420p";
+    let mut chain = Vec::new();
+    if let Some(h) = video.height {
+        chain.push(format!("scale=-2:{h}"));
+    }
+    match video.to_sdr {
+        Some(Hdr::Pq) if zscale => chain.push(
+            "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,\
+             tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+                .to_string(),
+        ),
+        Some(_) => chain.push(COLORSPACE.to_string()),
+        None => {}
+    }
+    (!chain.is_empty()).then(|| chain.join(","))
 }
 
 /// Base path for ffmpeg's two-pass log, unique per process + input stem.
@@ -1096,6 +1217,7 @@ fn encode_at_crf(
     tools: &deepshrink_ffmpeg::Tools,
     plan: &EncodePlan,
     encoder: &str,
+    zscale: bool,
     crf: u8,
     total: f64,
     on_progress: &mut dyn FnMut(PassKind, f64),
@@ -1104,7 +1226,7 @@ fn encode_at_crf(
     trial.spec.video.crf = Some(crf);
     trial.spec.video.bitrate_bps = None;
     trial.spec.two_pass = false;
-    let args = build_pass_args(&trial, PassKind::Single, "", encoder);
+    let args = build_pass_args(&trial, PassKind::Single, "", encoder, zscale);
     deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, total, &mut |f| {
         on_progress(PassKind::Single, f)
     })?;
@@ -1168,6 +1290,7 @@ fn build_pass_args(
     pass: PassKind,
     passlog: &str,
     encoder: &str,
+    zscale: bool,
 ) -> Vec<OsString> {
     let s = &plan.spec;
     let mut a: Vec<OsString> = Vec::new();
@@ -1239,9 +1362,9 @@ fn build_pass_args(
     // Video codec + filters.
     push!("-c:v");
     push!(encoder);
-    if let Some(h) = s.video.height {
+    if let Some(vf) = video_filters(&s.video, zscale) {
         push!("-vf");
-        push!(format!("scale=-2:{h}"));
+        push!(vf);
     }
     if let Some(f) = s.video.fps {
         push!("-r");
@@ -1255,6 +1378,19 @@ fn build_pass_args(
     if let Some(tag) = s.video.codec.mp4_tag() {
         push!("-tag:v");
         push!(tag);
+    }
+    // Tone-mapped to SDR: 8-bit, and labelled BT.709 so players don't treat
+    // it as HDR (the source's BT.2020/HLG tags would otherwise carry over).
+    if s.video.to_sdr.is_some() {
+        for (flag, value) in [
+            ("-pix_fmt", "yuv420p"),
+            ("-color_primaries", "bt709"),
+            ("-color_trc", "bt709"),
+            ("-colorspace", "bt709"),
+        ] {
+            push!(flag);
+            push!(value);
+        }
     }
 
     // Rate control.
@@ -1342,6 +1478,7 @@ mod tests {
             audio_channels: if audio { Some(2) } else { None },
             audio_bitrate_bps: None,
             capture: CaptureMeta::default(),
+            hdr: None,
         }
     }
 
@@ -1410,7 +1547,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let args = build_pass_args(&plan, PassKind::Second, "/tmp/passlog", enc(&plan));
+        let args = build_pass_args(&plan, PassKind::Second, "/tmp/passlog", enc(&plan), false);
         let joined: Vec<String> = args
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
@@ -1422,11 +1559,16 @@ mod tests {
         let stereo = MediaEngine::new()
             .plan(&info, &opts_target(8_000_000))
             .unwrap();
-        let stereo_args: Vec<String> =
-            build_pass_args(&stereo, PassKind::Second, "/tmp/passlog", enc(&stereo))
-                .iter()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect();
+        let stereo_args: Vec<String> = build_pass_args(
+            &stereo,
+            PassKind::Second,
+            "/tmp/passlog",
+            enc(&stereo),
+            false,
+        )
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
         assert!(!stereo_args.iter().any(|a| a == "-ac"));
     }
 
@@ -1462,7 +1604,7 @@ mod tests {
         assert!(plan.spec.passthrough);
         assert!(!plan.spec.two_pass);
         assert_eq!(plan.expected_bytes, Some(200_000));
-        let args = build_pass_args(&plan, PassKind::Single, "/tmp/passlog", enc(&plan));
+        let args = build_pass_args(&plan, PassKind::Single, "/tmp/passlog", enc(&plan), false);
         let joined: Vec<String> = args
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
@@ -1535,6 +1677,7 @@ mod tests {
             audio_channels: Some(channels),
             audio_bitrate_bps: None,
             capture: CaptureMeta::default(),
+            hdr: None,
         }
     }
 
@@ -1637,7 +1780,7 @@ mod tests {
         };
         let plan = MediaEngine::new().plan(&info, &opts).unwrap();
         assert_eq!(plan.output, PathBuf::from("/tmp/lecture.shrink.opus"));
-        let args = build_pass_args(&plan, PassKind::Single, "/tmp/passlog", enc(&plan));
+        let args = build_pass_args(&plan, PassKind::Single, "/tmp/passlog", enc(&plan), false);
         let j: Vec<String> = args
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
@@ -1674,7 +1817,7 @@ mod tests {
         let plan = MediaEngine::new()
             .plan(&info, &opts_target(8_000_000))
             .unwrap();
-        let args = build_pass_args(&plan, PassKind::First, "/tmp/passlog", enc(&plan));
+        let args = build_pass_args(&plan, PassKind::First, "/tmp/passlog", enc(&plan), false);
         let joined: Vec<String> = args
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
@@ -1691,7 +1834,7 @@ mod tests {
         let plan = MediaEngine::new()
             .plan(&info, &opts_target(8_000_000))
             .unwrap();
-        let args = build_pass_args(&plan, PassKind::Second, "/tmp/passlog", enc(&plan));
+        let args = build_pass_args(&plan, PassKind::Second, "/tmp/passlog", enc(&plan), false);
         let joined: Vec<String> = args
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
@@ -1703,10 +1846,110 @@ mod tests {
     }
 
     fn joined(plan: &EncodePlan, pass: PassKind) -> Vec<String> {
-        build_pass_args(plan, pass, "/tmp/passlog", enc(plan))
+        joined_with(plan, pass, false)
+    }
+
+    fn joined_with(plan: &EncodePlan, pass: PassKind, zscale: bool) -> Vec<String> {
+        build_pass_args(plan, pass, "/tmp/passlog", enc(plan), zscale)
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn hdr_transfer_is_recognised() {
+        assert_eq!(Hdr::from_transfer("arib-std-b67"), Some(Hdr::Hlg));
+        assert_eq!(Hdr::from_transfer("smpte2084"), Some(Hdr::Pq));
+        assert_eq!(Hdr::from_transfer("bt709"), None);
+    }
+
+    #[test]
+    fn hdr_is_tone_mapped_to_sdr_for_size_targets_only() {
+        let mut info = iphone_info();
+        info.hdr = Some(Hdr::Hlg);
+        let engine = MediaEngine::new();
+
+        // Discord: must play everywhere → 8-bit SDR BT.709.
+        let target = engine.plan(&info, &opts_target(10_000_000)).unwrap();
+        assert_eq!(target.spec.video.to_sdr, Some(Hdr::Hlg));
+        assert!(target.summary.contains("HDR → SDR"));
+        let vf_of =
+            |args: &[String]| args[args.iter().position(|a| a == "-vf").unwrap() + 1].clone();
+        // HLG: the colorspace re-map (closest to what macOS shows), any build.
+        let hlg = joined_with(&target, PassKind::Second, true);
+        let vf = vf_of(&hlg);
+        assert!(
+            vf.contains("colorspace=all=bt709") && !vf.contains("zscale"),
+            "{vf}"
+        );
+        // Downscale first, then convert the fewer pixels.
+        assert!(
+            vf.find("scale=-2:").unwrap() < vf.find("colorspace").unwrap(),
+            "{vf}"
+        );
+        for pair in [
+            ["-pix_fmt", "yuv420p"],
+            ["-color_trc", "bt709"],
+            ["-colorspace", "bt709"],
+        ] {
+            assert!(hlg.windows(2).any(|w| w == pair), "{pair:?}");
+        }
+        // PQ: a real tone-map with zscale, the colorspace re-map without it.
+        let mut pq = target.clone();
+        pq.spec.video.to_sdr = Some(Hdr::Pq);
+        let vf = vf_of(&joined_with(&pq, PassKind::Second, true));
+        assert!(
+            vf.contains("tonemap=hable") && vf.contains("npl=100"),
+            "{vf}"
+        );
+        let vf = vf_of(&joined_with(&pq, PassKind::Second, false));
+        assert!(
+            vf.contains("colorspace=all=bt709") && !vf.contains("zscale"),
+            "{vf}"
+        );
+
+        // Quality mode keeps HDR and 10-bit as shot.
+        let quality = engine.plan(&info, &ShrinkOpts::default()).unwrap();
+        assert_eq!(quality.spec.video.to_sdr, None);
+        let args = joined(&quality, PassKind::Single);
+        assert!(!args
+            .iter()
+            .any(|a| a == "-pix_fmt" || a.contains("colorspace")));
+
+        // An SDR source is left alone even with a target.
+        let sdr = engine
+            .plan(&iphone_info(), &opts_target(10_000_000))
+            .unwrap();
+        assert_eq!(sdr.spec.video.to_sdr, None);
+        assert!(!joined(&sdr, PassKind::Second)
+            .iter()
+            .any(|a| a == "-pix_fmt"));
+    }
+
+    #[test]
+    fn a_size_target_is_a_ceiling_at_the_quality_crf() {
+        let info = video_info(60.0, 200_000_000, 1920, 1080, true);
+        let engine = MediaEngine::new();
+        let opts = opts_target(50_000_000);
+        let plan = engine.plan(&info, &opts).unwrap();
+        let crf = opts.quality.default_crf(opts.video_codec);
+        assert_eq!(plan.ceiling_crf, Some(crf));
+
+        let ceiling = ceiling_plan(&plan).unwrap();
+        assert_eq!(ceiling.spec.video.crf, Some(crf));
+        assert_eq!(ceiling.spec.video.bitrate_bps, None);
+        assert!(!ceiling.spec.two_pass);
+        // Same everything else: resolution, audio, output, the target itself.
+        assert_eq!(ceiling.spec.video.height, plan.spec.video.height);
+        assert_eq!(ceiling.spec.audio, plan.spec.audio);
+        assert_eq!(ceiling.output, plan.output);
+        assert_eq!(ceiling.target_bytes, plan.target_bytes);
+
+        // Quality mode and passthrough have no ceiling to try.
+        let quality = engine.plan(&info, &ShrinkOpts::default()).unwrap();
+        assert!(quality.ceiling_crf.is_none() && ceiling_plan(&quality).is_none());
+        let fits = engine.plan(&info, &opts_target(300_000_000)).unwrap();
+        assert!(fits.spec.passthrough && ceiling_plan(&fits).is_none());
     }
 
     fn iphone_info() -> MediaInfo {
@@ -1840,7 +2083,7 @@ mod tests {
             ..opts_target(8_000_000)
         };
         let plan = MediaEngine::new().plan(&info, &opts).unwrap();
-        let args = build_pass_args(&plan, PassKind::Second, "/tmp/passlog", enc(&plan));
+        let args = build_pass_args(&plan, PassKind::Second, "/tmp/passlog", enc(&plan), false);
         let joined: Vec<String> = args
             .iter()
             .map(|a| a.to_string_lossy().into_owned())

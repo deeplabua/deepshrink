@@ -23,6 +23,25 @@ pub fn has_encoder(ffmpeg: &Path, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether this ffmpeg has the video filter `name` (e.g. `zscale`, which needs
+/// a build with libzimg). Spawns `ffmpeg -filters`; callers ask only when needed.
+pub fn has_filter(ffmpeg: &Path, name: &str) -> bool {
+    Command::new(ffmpeg)
+        .args(["-hide_banner", "-filters"])
+        .output()
+        .map(|o| filter_listed(&String::from_utf8_lossy(&o.stdout), name))
+        .unwrap_or(false)
+}
+
+/// Parse the `ffmpeg -filters` table (" TS colorspace   V->V   Convert…").
+pub(crate) fn filter_listed(listing: &str, name: &str) -> bool {
+    listing.lines().any(|line| {
+        let mut cols = line.split_whitespace();
+        let flags = cols.next().unwrap_or("");
+        flags.len() <= 3 && flags.chars().all(|c| "TSC.".contains(c)) && cols.next() == Some(name)
+    })
+}
+
 /// Parse the `ffmpeg -encoders` table for an exact encoder name. Split out from
 /// the process call so the parsing is testable without ffmpeg.
 pub(crate) fn encoder_listed(listing: &str, name: &str) -> bool {
@@ -38,6 +57,16 @@ pub(crate) fn encoder_listed(listing: &str, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filters_table_is_parsed_by_exact_name() {
+        let listing = " TS colorspace        V->V       Convert between colorspaces.\n \
+                        .S tonemap           V->V       Conversion to/from different dynamic ranges.\n";
+        assert!(filter_listed(listing, "tonemap"));
+        assert!(filter_listed(listing, "colorspace"));
+        assert!(!filter_listed(listing, "zscale"));
+        assert!(!filter_listed(listing, "V->V"));
+    }
 
     const LISTING: &str = "Encoders:
  V..... libx264              libx264 H.264 / AVC (codec h264)

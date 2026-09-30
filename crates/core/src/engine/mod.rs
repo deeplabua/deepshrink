@@ -35,6 +35,29 @@ pub struct MediaInfo {
     /// When / where / with what it was shot (container tags), carried over to
     /// the output when metadata is kept.
     pub capture: CaptureMeta,
+    /// The video is HDR (HLG or PQ transfer), `None` for SDR / unknown / audio.
+    pub hdr: Option<Hdr>,
+}
+
+/// HDR transfer function of a source video.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hdr {
+    /// Hybrid Log-Gamma (`arib-std-b67`) — iPhone and most phone cameras.
+    Hlg,
+    /// Perceptual Quantizer (`smpte2084`) — HDR10 / Dolby Vision from cameras,
+    /// screen recordings, films.
+    Pq,
+}
+
+impl Hdr {
+    /// From an ffprobe `color_transfer` value.
+    pub fn from_transfer(transfer: &str) -> Option<Self> {
+        match transfer {
+            "arib-std-b67" => Some(Self::Hlg),
+            "smpte2084" => Some(Self::Pq),
+            _ => None,
+        }
+    }
 }
 
 /// Capture metadata read from the source's container tags. iPhone videos keep
@@ -154,6 +177,10 @@ pub struct VideoSpec {
     /// Frame-rate cap; `None` keeps the source rate.
     pub fps: Option<u32>,
     pub preset: QualityPreset,
+    /// Tone-map this HDR source to 8-bit SDR (BT.709): set for size targets /
+    /// platform presets, where the file has to play everywhere — 10-bit H.264
+    /// (High 10) and HDR aren't decoded by most phones and browsers.
+    pub to_sdr: Option<Hdr>,
 }
 
 /// Audio encoding parameters (absent means drop the track).
@@ -229,6 +256,10 @@ pub struct EncodePlan {
     /// Keep the original instead of producing a result that isn't smaller
     /// (see [`ShrinkOpts::allow_larger`]). Engines without a guard set `false`.
     pub guard_larger: bool,
+    /// Size targets only: the quality preset's CRF, used as a ceiling — when a
+    /// CRF encode is predicted to land well under the target, it's used instead
+    /// of spending the whole budget (a 2 s clip needn't take 10 MB for Discord).
+    pub ceiling_crf: Option<u8>,
 }
 
 /// The execution result — the result of [`Engine::run`].

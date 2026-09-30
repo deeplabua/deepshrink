@@ -49,6 +49,9 @@ pub struct Stream {
     /// Stream bit rate in bits/s, as a string (absent for some containers).
     #[serde(default)]
     pub bit_rate: Option<String>,
+    /// Transfer characteristic, e.g. "bt709", "arib-std-b67" (HLG), "smpte2084" (PQ).
+    #[serde(default)]
+    pub color_transfer: Option<String>,
 }
 
 impl Ffprobe {

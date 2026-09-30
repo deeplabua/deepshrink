@@ -20,7 +20,7 @@ pub mod progress;
 pub mod run;
 pub mod vmaf;
 
-pub use caps::has_encoder;
+pub use caps::{has_encoder, has_filter};
 pub use probe::{probe, Ffprobe};
 pub use run::run_pass;
 pub use vmaf::{has_libvmaf, measure_vmaf};
