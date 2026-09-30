@@ -3,6 +3,20 @@
 All notable changes to DeepShrink. The release pipeline uses the matching
 `## [x.y.z]` section as the GitHub release notes.
 
+## [0.3.8] - 2026-09-30
+
+### Changed
+
+- **"Never bigger" means worth it.** In quality mode a re-encode now has to save
+  at least 5% of the source; otherwise the original is kept as-is. An iPhone
+  HEVC clip that H.264 would shrink by 0.2% is no longer encoded for minutes
+  for nothing. `--dry-run` reports those files as "would be kept as-is".
+
+### Library (`deepshrink-core`)
+
+- `MIN_SAVING` and `not_worth_it(expected, source)` — the same threshold for
+  the guard, dry runs and UI previews.
+
 ## [0.3.7] - 2026-09-30
 
 ### Library (`deepshrink-core`, `deepshrink-ffmpeg`)
