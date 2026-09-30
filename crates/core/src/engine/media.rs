@@ -31,12 +31,33 @@ pub enum PassKind {
 }
 
 /// The ffmpeg engine for video and audio.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct MediaEngine;
+#[derive(Debug, Default, Clone)]
+pub struct MediaEngine {
+    /// Stops this engine's runs (see [`MediaEngine::with_cancel`]).
+    cancel: Option<deepshrink_ffmpeg::CancelToken>,
+}
 
 impl MediaEngine {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// An engine whose `run` / `estimate` stop when `cancel` is set: the running
+    /// ffmpeg is killed, the partial output removed, and the call returns an
+    /// error for which [`EngineError::is_cancelled`] is true.
+    pub fn with_cancel(cancel: deepshrink_ffmpeg::CancelToken) -> Self {
+        Self {
+            cancel: Some(cancel),
+        }
+    }
+
+    /// The located ffmpeg / ffprobe, carrying this engine's cancel token.
+    fn tools(&self) -> Result<deepshrink_ffmpeg::Tools, EngineError> {
+        let tools = deepshrink_ffmpeg::locate()?;
+        Ok(match &self.cancel {
+            Some(c) => tools.with_cancel(c.clone()),
+            None => tools,
+        })
     }
 
     /// Like [`Engine::run`] but reports progress: `on_progress(pass, fraction)`
@@ -46,7 +67,18 @@ impl MediaEngine {
         plan: &EncodePlan,
         on_progress: &mut dyn FnMut(PassKind, f64),
     ) -> Result<Outcome, EngineError> {
-        let outcome = self.run_inner(plan, on_progress)?;
+        let outcome = match self.run_inner(plan, on_progress) {
+            Ok(o) => o,
+            Err(e) => {
+                // A stopped encode leaves nothing behind: no half-written file,
+                // no two-pass log.
+                if e.is_cancelled() && plan.output != plan.input {
+                    let _ = fs::remove_file(&plan.output);
+                    cleanup_passlog(&passlog_base(plan));
+                }
+                return Err(e);
+            }
+        };
         // Keep the source's modification time too, so the result sorts next to
         // the original (Finder, Photos imports) instead of "today".
         if plan.spec.keep_metadata {
@@ -60,7 +92,7 @@ impl MediaEngine {
         plan: &EncodePlan,
         on_progress: &mut dyn FnMut(PassKind, f64),
     ) -> Result<Outcome, EngineError> {
-        let tools = deepshrink_ffmpeg::locate()?;
+        let tools = self.tools()?;
         let encoder = resolve_encoder(&tools, plan)?;
         let zscale = wants_zscale(&tools, plan);
 
@@ -148,18 +180,12 @@ impl MediaEngine {
 
         if plan.spec.two_pass {
             let args1 = build_pass_args(plan, PassKind::First, &passlog, encoder, zscale);
-            deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args1, total, &mut |f| {
-                on_progress(PassKind::First, f)
-            })?;
+            tools.run_pass(&args1, total, &mut |f| on_progress(PassKind::First, f))?;
             let args2 = build_pass_args(plan, PassKind::Second, &passlog, encoder, zscale);
-            deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args2, total, &mut |f| {
-                on_progress(PassKind::Second, f)
-            })?;
+            tools.run_pass(&args2, total, &mut |f| on_progress(PassKind::Second, f))?;
         } else {
             let args = build_pass_args(plan, PassKind::Single, &passlog, encoder, zscale);
-            deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, total, &mut |f| {
-                on_progress(PassKind::Single, f)
-            })?;
+            tools.run_pass(&args, total, &mut |f| on_progress(PassKind::Single, f))?;
         }
 
         let mut size = fs::metadata(&plan.output)?.len();
@@ -173,9 +199,7 @@ impl MediaEngine {
                     let mut retry = plan.clone();
                     retry.spec.video.bitrate_bps = Some(corrected);
                     let args = build_pass_args(&retry, PassKind::Second, &passlog, encoder, zscale);
-                    deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, total, &mut |f| {
-                        on_progress(PassKind::Second, f)
-                    })?;
+                    tools.run_pass(&args, total, &mut |f| on_progress(PassKind::Second, f))?;
                     size = fs::metadata(&plan.output)?.len();
                 }
             }
@@ -202,7 +226,7 @@ impl MediaEngine {
         }
         if ceiling_plan(plan).is_some() {
             // A size target: the budget, or less when the quality CRF fits.
-            let tools = deepshrink_ffmpeg::locate()?;
+            let tools = self.tools()?;
             let encoder = resolve_encoder(&tools, plan)?;
             let zscale = wants_zscale(&tools, plan);
             let fit = ceiling_fit(&tools, plan, encoder, zscale).map(|(_, bytes)| bytes);
@@ -214,7 +238,7 @@ impl MediaEngine {
         if plan.spec.audio_only || plan.spec.video.crf.is_none() {
             return Ok(None);
         }
-        let tools = deepshrink_ffmpeg::locate()?;
+        let tools = self.tools()?;
         let encoder = resolve_encoder(&tools, plan)?;
         let zscale = wants_zscale(&tools, plan);
         Ok(predict_crf_bytes(&tools, plan, encoder, zscale))
@@ -261,10 +285,9 @@ impl MediaEngine {
     ) -> Result<Outcome, EngineError> {
         // Stream copy — the video encoder is never reached.
         let args = build_pass_args(plan, PassKind::Single, "", "copy", false);
-        let remuxed =
-            deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, plan.source_duration_sec, &mut |f| {
-                on_progress(PassKind::Single, f)
-            });
+        let remuxed = tools.run_pass(&args, plan.source_duration_sec, &mut |f| {
+            on_progress(PassKind::Single, f)
+        });
         if remuxed.is_err() {
             fs::copy(&plan.input, &plan.output)?;
             on_progress(PassKind::Single, 1.0);
@@ -1002,7 +1025,7 @@ fn predict_crf_bytes(
                 OsString::from(format!("{len:.2}")),
             ],
         );
-        let ran = deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, len, &mut |_| {});
+        let ran = tools.run_pass(&args, len, &mut |_| {});
         let bytes = fs::metadata(&sample.output).map(|m| m.len()).ok();
         let _ = fs::remove_file(&sample.output);
         video_bytes += bytes.filter(|_| ran.is_ok())?;
@@ -1227,9 +1250,7 @@ fn encode_at_crf(
     trial.spec.video.bitrate_bps = None;
     trial.spec.two_pass = false;
     let args = build_pass_args(&trial, PassKind::Single, "", encoder, zscale);
-    deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, total, &mut |f| {
-        on_progress(PassKind::Single, f)
-    })?;
+    tools.run_pass(&args, total, &mut |f| on_progress(PassKind::Single, f))?;
     Ok(())
 }
 

@@ -289,6 +289,17 @@ pub enum EngineError {
     Io(#[from] std::io::Error),
 }
 
+impl EngineError {
+    /// The run was stopped through its cancel token (see
+    /// [`media::MediaEngine::with_cancel`]) — not a failure to report.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(
+            self,
+            Self::Ffmpeg(deepshrink_ffmpeg::FfmpegError::Cancelled)
+        )
+    }
+}
+
 /// The compression engine contract. The one v0.1 implementation is [`media::MediaEngine`].
 pub trait Engine {
     /// Whether this engine handles the given file.

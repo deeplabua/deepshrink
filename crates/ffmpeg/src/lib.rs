@@ -22,7 +22,7 @@ pub mod vmaf;
 
 pub use caps::{has_encoder, has_filter};
 pub use probe::{probe, Ffprobe};
-pub use run::run_pass;
+pub use run::{run_pass, run_pass_cancellable, CancelToken};
 pub use vmaf::{has_libvmaf, measure_vmaf};
 
 /// Errors from the ffmpeg layer.
@@ -49,6 +49,9 @@ pub enum FfmpegError {
     },
     #[error("failed to parse ffprobe output: {0}")]
     Parse(String),
+    /// The run was stopped through its [`CancelToken`]; ffmpeg was killed.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// The located binaries.
@@ -56,6 +59,27 @@ pub enum FfmpegError {
 pub struct Tools {
     pub ffmpeg: PathBuf,
     pub ffprobe: PathBuf,
+    /// Stops every [`Tools::run_pass`] made with these tools (a new, never-set
+    /// token by default — see [`Tools::with_cancel`]).
+    pub cancel: CancelToken,
+}
+
+impl Tools {
+    /// These tools, with runs stopped by `cancel`.
+    pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    /// [`run_pass_cancellable`] with this `ffmpeg` and cancel token.
+    pub fn run_pass<S: AsRef<std::ffi::OsStr>>(
+        &self,
+        args: &[S],
+        total_secs: f64,
+        on_progress: &mut dyn FnMut(f64),
+    ) -> Result<(), FfmpegError> {
+        run_pass_cancellable(&self.ffmpeg, args, total_secs, on_progress, &self.cancel)
+    }
 }
 
 /// Locate `ffmpeg` and `ffprobe`. Returns the first missing tool as an error.
@@ -63,6 +87,7 @@ pub fn locate() -> Result<Tools, FfmpegError> {
     Ok(Tools {
         ffmpeg: locate_one("ffmpeg", "DEEPSHRINK_FFMPEG")?,
         ffprobe: locate_one("ffprobe", "DEEPSHRINK_FFPROBE")?,
+        cancel: CancelToken::default(),
     })
 }
 
