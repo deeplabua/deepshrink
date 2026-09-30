@@ -42,6 +42,9 @@ pub struct Stream {
     pub channels: Option<u32>,
     /// Average frame rate as "num/den", e.g. "30000/1001".
     pub r_frame_rate: Option<String>,
+    /// Stream bit rate in bits/s, as a string (absent for some containers).
+    #[serde(default)]
+    pub bit_rate: Option<String>,
 }
 
 impl Ffprobe {
@@ -70,6 +73,14 @@ impl Ffprobe {
         self.streams
             .iter()
             .find(|s| s.codec_type.as_deref() == Some("audio"))
+    }
+
+    /// Bit rate of the first audio stream in bits/s, if reported.
+    pub fn audio_bitrate_bps(&self) -> Option<u64> {
+        self.audio_stream()
+            .and_then(|s| s.bit_rate.as_deref())
+            .and_then(|b| b.trim().parse().ok())
+            .filter(|&b| b > 0)
     }
 
     /// Frame rate of the first video stream, if parseable.

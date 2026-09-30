@@ -46,6 +46,20 @@ impl MediaEngine {
         plan: &EncodePlan,
         on_progress: &mut dyn FnMut(PassKind, f64),
     ) -> Result<Outcome, EngineError> {
+        let outcome = self.run_inner(plan, on_progress)?;
+        // Keep the source's modification time too, so the result sorts next to
+        // the original (Finder, Photos imports) instead of "today".
+        if plan.spec.keep_metadata {
+            copy_mtime(&plan.input, &outcome.output);
+        }
+        Ok(outcome)
+    }
+
+    fn run_inner(
+        &self,
+        plan: &EncodePlan,
+        on_progress: &mut dyn FnMut(PassKind, f64),
+    ) -> Result<Outcome, EngineError> {
         let tools = deepshrink_ffmpeg::locate()?;
         let encoder = resolve_encoder(&tools, plan)?;
 
@@ -344,7 +358,13 @@ impl MediaEngine {
                     .output
                     .clone()
                     .unwrap_or_else(|| output_with_ext(&info.path, src_ext));
-                return Ok(passthrough_plan(info, output, tb, false));
+                return Ok(passthrough_plan(
+                    info,
+                    output,
+                    tb,
+                    false,
+                    opts.keep_metadata,
+                ));
             }
         }
 
@@ -378,7 +398,8 @@ impl MediaEngine {
                         .output
                         .clone()
                         .unwrap_or_else(|| output_with_ext(&info.path, src_ext));
-                    let mut plan = passthrough_plan(info, output, info.size_bytes, false);
+                    let mut plan =
+                        passthrough_plan(info, output, info.size_bytes, false, opts.keep_metadata);
                     plan.summary =
                         "stream copy (already compact — a re-encode would not be smaller)".into();
                     return Ok(plan);
@@ -422,6 +443,7 @@ impl MediaEngine {
                 passthrough: false,
                 audio_only: true,
                 dpi: None,
+                keep_metadata: opts.keep_metadata,
             },
             // A size target is its own guarantee; quality mode gets the guard.
             guard_larger: target.is_none() && !opts.allow_larger,
@@ -457,6 +479,7 @@ impl Engine for MediaEngine {
             video_codec: video.and_then(|v| v.codec_name.clone()),
             audio_codec: audio.and_then(|a| a.codec_name.clone()),
             audio_channels: audio.and_then(|a| a.channels),
+            audio_bitrate_bps: p.audio_bitrate_bps(),
         })
     }
 
@@ -502,11 +525,17 @@ impl Engine for MediaEngine {
                     .output
                     .clone()
                     .unwrap_or_else(|| output_with_ext(&info.path, src_ext));
-                return Ok(passthrough_plan(info, output, tb, true));
+                return Ok(passthrough_plan(info, output, tb, true, opts.keep_metadata));
             }
         }
 
-        let audio = decide_audio(opts, info.has_audio(), target, duration)?;
+        let audio = decide_audio(
+            opts,
+            info.has_audio(),
+            info.audio_bitrate_bps,
+            target,
+            duration,
+        )?;
         let audio_bps = audio.as_ref().map(|a| a.bitrate_bps).unwrap_or(0);
 
         let (video, expected_bytes) = if let Some(tb) = target {
@@ -574,6 +603,7 @@ impl Engine for MediaEngine {
                 passthrough: false,
                 audio_only: false,
                 dpi: None,
+                keep_metadata: opts.keep_metadata,
             },
             // A size target is its own guarantee; quality mode gets the guard.
             guard_larger: target.is_none() && !opts.allow_larger,
@@ -599,7 +629,13 @@ fn placeholder_video_spec() -> VideoSpec {
 
 /// A stream-copy remux plan for when the source already fits the target.
 /// `faststart` is only meaningful for MP4/MOV; pass `false` for pure audio.
-fn passthrough_plan(info: &MediaInfo, output: PathBuf, target: u64, faststart: bool) -> EncodePlan {
+fn passthrough_plan(
+    info: &MediaInfo,
+    output: PathBuf,
+    target: u64,
+    faststart: bool,
+    keep_metadata: bool,
+) -> EncodePlan {
     EncodePlan {
         input: info.path.clone(),
         output,
@@ -619,6 +655,7 @@ fn passthrough_plan(info: &MediaInfo, output: PathBuf, target: u64, faststart: b
             passthrough: true,
             audio_only: false,
             dpi: None,
+            keep_metadata,
         },
         guard_larger: false,
     }
@@ -654,6 +691,51 @@ fn already_compact_audio(bps: u64, info: &MediaInfo) -> bool {
     }
     let source_bps = info.size_bytes as f64 * 8.0 / info.duration_sec;
     bps as f64 >= source_bps * 0.9
+}
+
+/// Best-effort: give `output` the modification time of `input`.
+fn copy_mtime(input: &Path, output: &Path) {
+    let Ok(mtime) = fs::metadata(input).and_then(|m| m.modified()) else {
+        return;
+    };
+    if let Ok(f) = fs::File::options().write(true).open(output) {
+        let _ = f.set_modified(mtime);
+    }
+}
+
+/// Containers whose muxer understands `-movflags` (MP4 / QuickTime family).
+fn is_mov_family(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("mp4" | "m4v" | "m4a" | "mov")
+    )
+}
+
+/// Metadata flags for the output: keep = map the source's global metadata and
+/// (MP4/MOV) write QuickTime keys too — iPhone location/make/model live there
+/// and the plain MP4 muxer drops them; strip = drop all global metadata.
+fn metadata_args(plan: &EncodePlan) -> (Vec<OsString>, Option<&'static str>) {
+    if plan.spec.keep_metadata {
+        let flag = is_mov_family(&plan.output).then_some("+use_metadata_tags");
+        (vec!["-map_metadata".into(), "0".into()], flag)
+    } else {
+        (vec!["-map_metadata".into(), "-1".into()], None)
+    }
+}
+
+/// `-movflags` value combining faststart and metadata tags (None = no flag).
+fn movflags(faststart: bool, meta: Option<&'static str>) -> Option<String> {
+    let mut v = String::new();
+    if faststart {
+        v.push_str("+faststart");
+    }
+    if let Some(m) = meta {
+        v.push_str(m);
+    }
+    (!v.is_empty()).then_some(v)
 }
 
 /// Sample windows for [`predict_crf_bytes`]: three 3-second clips at 20/50/80%.
@@ -753,6 +835,7 @@ fn target_bytes(goal: &SizeGoal, original: u64) -> Option<u64> {
 fn decide_audio(
     opts: &ShrinkOpts,
     has_audio: bool,
+    source_bps: Option<u64>,
     target: Option<u64>,
     duration: f64,
 ) -> Result<Option<AudioSpec>, EngineError> {
@@ -774,6 +857,13 @@ fn decide_audio(
                     .ok_or(EngineError::Infeasible)?,
                 None => budget::DEFAULT_AUDIO_BPS,
             };
+            // Never re-encode the track above its own bitrate: that only adds
+            // bytes (a 64 kbps phone recording doesn't need 128 kbps AAC). Any
+            // budget saved here goes to the video.
+            let bps = match source_bps {
+                Some(src) => bps.min(src.max(MIN_TRACK_BPS)),
+                None => bps,
+            };
             Ok(Some(AudioSpec {
                 mono,
                 ..AudioSpec::cbr(AudioCodec::Aac, bps)
@@ -781,6 +871,10 @@ fn decide_audio(
         }
     }
 }
+
+/// Floor for a capped audio track (a mis-reported tiny source rate must not
+/// starve the audio).
+const MIN_TRACK_BPS: u64 = 32_000;
 
 /// Choose the encode height in auto/explicit mode.
 fn pick_height(res: ResolutionOpt, src_height: u32, vbps: u64) -> Option<u32> {
@@ -973,13 +1067,16 @@ fn build_pass_args(
     push!("-i");
     a.push(plan.input.clone().into_os_string());
 
+    let (meta, meta_flag) = metadata_args(plan);
+
     // Passthrough: stream copy, no re-encode. Output only (single pass).
     if s.passthrough {
         push!("-c");
         push!("copy");
-        if s.faststart {
+        a.extend(meta.iter().cloned());
+        if let Some(flags) = movflags(s.faststart, meta_flag) {
             push!("-movflags");
-            push!("+faststart");
+            push!(flags);
         }
         a.push(plan.output.clone().into_os_string());
         return a;
@@ -1007,6 +1104,11 @@ fn build_pass_args(
                 push!("-vbr");
                 push!(if au.vbr { "on" } else { "constrained" });
             }
+        }
+        a.extend(meta.iter().cloned());
+        if let Some(flags) = movflags(false, meta_flag) {
+            push!("-movflags");
+            push!(flags);
         }
         a.push(plan.output.clone().into_os_string());
         return a;
@@ -1081,9 +1183,10 @@ fn build_pass_args(
                 }
                 None => push!("-an"),
             }
-            if s.faststart {
+            a.extend(meta.iter().cloned());
+            if let Some(flags) = movflags(s.faststart, meta_flag) {
                 push!("-movflags");
-                push!("+faststart");
+                push!(flags);
             }
             a.push(plan.output.clone().into_os_string());
         }
@@ -1115,6 +1218,7 @@ mod tests {
             video_codec: Some("h264".into()),
             audio_codec: if audio { Some("aac".into()) } else { None },
             audio_channels: if audio { Some(2) } else { None },
+            audio_bitrate_bps: None,
         }
     }
 
@@ -1306,6 +1410,7 @@ mod tests {
             video_codec: None,
             audio_codec: Some("pcm_s16le".into()),
             audio_channels: Some(channels),
+            audio_bitrate_bps: None,
         }
     }
 
@@ -1469,8 +1574,68 @@ mod tests {
             .collect();
         assert!(joined.iter().any(|a| a.contains("clip.shrink.mp4")));
         assert!(joined.contains(&"-c:a".to_string()));
-        assert!(joined.contains(&"+faststart".to_string()));
+        assert!(joined.iter().any(|a| a.contains("+faststart")));
         assert!(joined.iter().any(|a| a == "2")); // -pass 2
+    }
+
+    fn joined(plan: &EncodePlan, pass: PassKind) -> Vec<String> {
+        build_pass_args(plan, pass, "/tmp/passlog", enc(plan))
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn metadata_is_kept_by_default_and_strippable() {
+        let info = video_info(60.0, 50_000_000, 1920, 1080, true);
+        let plan = MediaEngine::new()
+            .plan(&info, &ShrinkOpts::default())
+            .unwrap();
+        let a = joined(&plan, PassKind::Single);
+        let at = a.iter().position(|x| x == "-map_metadata").unwrap();
+        assert_eq!(a[at + 1], "0");
+        // One -movflags carrying both faststart and the QuickTime keys (iPhone
+        // location / make / model live there; plain MP4 drops them).
+        assert!(
+            a.contains(&"+faststart+use_metadata_tags".to_string()),
+            "{a:?}"
+        );
+
+        let strip = ShrinkOpts {
+            keep_metadata: false,
+            ..ShrinkOpts::default()
+        };
+        let plan = MediaEngine::new().plan(&info, &strip).unwrap();
+        let a = joined(&plan, PassKind::Single);
+        let at = a.iter().position(|x| x == "-map_metadata").unwrap();
+        assert_eq!(a[at + 1], "-1");
+        assert!(a.contains(&"+faststart".to_string()));
+    }
+
+    #[test]
+    fn a_video_audio_track_is_never_upsampled() {
+        let mut info = video_info(60.0, 50_000_000, 1920, 1080, true);
+        info.audio_bitrate_bps = Some(64_000);
+        let bps_of = |info: &MediaInfo, opts: &ShrinkOpts| {
+            let plan = MediaEngine::new().plan(info, opts).unwrap();
+            plan.spec.audio.unwrap().bitrate_bps
+        };
+        // Quality mode default is 128 kbps — capped at the source's 64 kbps.
+        assert_eq!(bps_of(&info, &ShrinkOpts::default()), 64_000);
+        // A size target too: never above the source (the rest goes to video).
+        assert!(bps_of(&info, &opts_target(20_000_000)) <= 64_000);
+        // An explicit `--audio 128k` is still honoured as asked.
+        let explicit = ShrinkOpts {
+            audio: AudioChoice::Bitrate(128_000),
+            ..ShrinkOpts::default()
+        };
+        assert_eq!(bps_of(&info, &explicit), 128_000);
+        // Unknown source rate → the default.
+        info.audio_bitrate_bps = None;
+        assert_eq!(
+            bps_of(&info, &ShrinkOpts::default()),
+            budget::DEFAULT_AUDIO_BPS
+        );
     }
 
     #[test]

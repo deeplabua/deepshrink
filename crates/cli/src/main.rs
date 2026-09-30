@@ -122,8 +122,17 @@ fn map_engine_error(err: EngineError) -> AppError {
 
 /// Outcome of processing a single file, for the batch summary.
 enum FileResult {
-    Encoded { original: u64, final_bytes: u64 },
-    DryRun,
+    Encoded {
+        original: u64,
+        final_bytes: u64,
+    },
+    DryRun {
+        original: u64,
+        /// Predicted output size; `None` when it can't be told.
+        expected: Option<u64>,
+        /// A real run would keep the original as-is.
+        kept: bool,
+    },
     Skipped,
 }
 
@@ -134,6 +143,13 @@ struct BatchStats {
     skipped: usize,
     total_original: u64,
     total_final: u64,
+    /// `--dry-run` totals: files, their size, the predicted size of the ones
+    /// that could be told, and how many would be kept as-is.
+    dry: usize,
+    dry_original: u64,
+    dry_expected: u64,
+    dry_unknown: usize,
+    dry_kept: usize,
 }
 
 fn run(cli: &Cli) -> Result<(), AppError> {
@@ -195,7 +211,23 @@ fn run(cli: &Cli) -> Result<(), AppError> {
                 stats.total_final += final_bytes;
             }
             Ok(FileResult::Skipped) => stats.skipped += 1,
-            Ok(FileResult::DryRun) => {}
+            Ok(FileResult::DryRun {
+                original,
+                expected,
+                kept,
+            }) => {
+                stats.dry += 1;
+                stats.dry_original += original;
+                match expected {
+                    Some(b) => stats.dry_expected += b,
+                    // Unknown: count it at its own size so the total stays honest.
+                    None => {
+                        stats.dry_unknown += 1;
+                        stats.dry_expected += original;
+                    }
+                }
+                stats.dry_kept += usize::from(kept);
+            }
             Err(err) => {
                 failed += 1;
                 worst_code = worst_code.max(err.code());
@@ -314,7 +346,17 @@ fn process_one(
                 "(dry run — no encoding)".if_supports_color(Stdout, |t| t.dimmed())
             );
         }
-        return Ok(FileResult::DryRun);
+        let kept = plan.spec.passthrough
+            || (plan.guard_larger && plan.expected_bytes.is_some_and(|b| b >= info.size_bytes));
+        return Ok(FileResult::DryRun {
+            original: info.size_bytes,
+            expected: if kept {
+                Some(info.size_bytes)
+            } else {
+                plan.expected_bytes
+            },
+            kept,
+        });
     }
 
     if !cli.quiet && !cli.json {
@@ -484,6 +526,7 @@ fn build_opts(cli: &Cli, goal: SizeGoal) -> Result<ShrinkOpts, AppError> {
         two_pass: None,
         dpi: None,
         allow_larger: cli.allow_larger,
+        keep_metadata: !cli.strip_metadata,
     })
 }
 
@@ -608,6 +651,32 @@ fn print_outcome(info: &MediaInfo, outcome: &Outcome) {
 }
 
 fn print_summary(stats: &BatchStats, failed: usize) {
+    if stats.dry > 0 {
+        // "Dry run. 30 file(s) · 2.1 GB → ~800 MB (−62%) · 5 would be kept as-is"
+        let pct = if stats.dry_original > 0 {
+            (1.0 - stats.dry_expected as f64 / stats.dry_original as f64) * 100.0
+        } else {
+            0.0
+        };
+        let mut line = format!(
+            "Dry run. {} file(s) · {} → ~{} (−{:.0}%)",
+            stats.dry,
+            format::size(stats.dry_original),
+            format::size(stats.dry_expected),
+            pct.max(0.0),
+        );
+        if stats.dry_kept > 0 {
+            line.push_str(&format!(" · {} would be kept as-is", stats.dry_kept));
+        }
+        if stats.dry_unknown > 0 {
+            line.push_str(&format!(" · {} not estimated", stats.dry_unknown));
+        }
+        if failed > 0 {
+            line.push_str(&format!(" · {failed} failed"));
+        }
+        println!("  {}", line.if_supports_color(Stdout, |t| t.bold()));
+        return;
+    }
     let saved = stats.total_original.saturating_sub(stats.total_final);
     let pct = if stats.total_original > 0 {
         (1.0 - stats.total_final as f64 / stats.total_original as f64) * 100.0

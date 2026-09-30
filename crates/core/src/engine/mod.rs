@@ -29,6 +29,9 @@ pub struct MediaInfo {
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
     pub audio_channels: Option<u32>,
+    /// Bit rate of the (first) audio stream in bits/s, when the probe reports
+    /// it — the ceiling for re-encoding a video's audio track.
+    pub audio_bitrate_bps: Option<u64>,
 }
 
 impl MediaInfo {
@@ -89,6 +92,10 @@ pub struct ShrinkOpts {
     /// quality, so the engine keeps the original instead (sample-predicted for
     /// video, bitrate-compared for audio, and checked after every encode).
     pub allow_larger: bool,
+    /// Carry the source's metadata over (creation date, location, camera —
+    /// QuickTime keys included) and its modification time. On by default;
+    /// `false` strips metadata from the output.
+    pub keep_metadata: bool,
 }
 
 impl Default for ShrinkOpts {
@@ -109,6 +116,7 @@ impl Default for ShrinkOpts {
             two_pass: None,
             dpi: None,
             allow_larger: false,
+            keep_metadata: true,
         }
     }
 }
@@ -170,6 +178,8 @@ pub struct EncodeSpec {
     /// Target DPI for a document's embedded images (see [`ShrinkOpts::dpi`]).
     /// Document engines only; ignored by the media engine.
     pub dpi: Option<u32>,
+    /// Copy metadata + mtime from the source (see [`ShrinkOpts::keep_metadata`]).
+    pub keep_metadata: bool,
 }
 
 /// The encode plan — the result of [`Engine::plan`]. Usable for `--dry-run`.

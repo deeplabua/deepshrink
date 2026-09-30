@@ -95,6 +95,11 @@ pub struct Cli {
     #[arg(long = "allow-larger")]
     pub allow_larger: bool,
 
+    /// Drop metadata (creation date, location, camera) from the output. By
+    /// default it's carried over, along with the file's modification time.
+    #[arg(long = "strip-metadata")]
+    pub strip_metadata: bool,
+
     /// Show the plan (bitrate, expected size) without encoding.
     #[arg(long = "dry-run")]
     pub dry_run: bool,
