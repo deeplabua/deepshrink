@@ -190,18 +190,32 @@ impl MediaEngine {
 
         let mut size = fs::metadata(&plan.output)?.len();
 
-        // Single correction retry: if two-pass overshot the target (VBV slack),
-        // scale the video bitrate down proportionally and re-run pass 2.
-        if let (Some(target), Some(vbps)) = (plan.target_bytes, plan.spec.video.bitrate_bps) {
-            if size > target && plan.spec.two_pass {
-                let corrected = (vbps as f64 * (target as f64 / size as f64) * 0.97) as u64;
-                if corrected >= budget::ABSOLUTE_MIN_VIDEO_BPS {
-                    let mut retry = plan.clone();
-                    retry.spec.video.bitrate_bps = Some(corrected);
-                    let args = build_pass_args(&retry, PassKind::Second, &passlog, encoder, zscale);
-                    tools.run_pass(&args, total, &mut |f| on_progress(PassKind::Second, f))?;
-                    size = fs::metadata(&plan.output)?.len();
+        // Correction retry: if the encode overshot the target (VBV slack),
+        // scale the video bitrate down proportionally and re-run the final
+        // pass. Two-pass needs one; Apple's one-pass encoder is looser, so it
+        // gets up to three.
+        if let (Some(target), Some(mut vbps)) = (plan.target_bytes, plan.spec.video.bitrate_bps) {
+            let (tries, pass) = if plan.spec.two_pass {
+                (1, PassKind::Second)
+            } else if plan.spec.video.hardware {
+                (3, PassKind::Single)
+            } else {
+                (0, PassKind::Single)
+            };
+            for _ in 0..tries {
+                if size <= target {
+                    break;
                 }
+                let corrected = (vbps as f64 * (target as f64 / size as f64) * 0.97) as u64;
+                if corrected < budget::ABSOLUTE_MIN_VIDEO_BPS {
+                    break;
+                }
+                vbps = corrected;
+                let mut retry = plan.clone();
+                retry.spec.video.bitrate_bps = Some(corrected);
+                let args = build_pass_args(&retry, pass, &passlog, encoder, zscale);
+                tools.run_pass(&args, total, &mut |f| on_progress(pass, f))?;
+                size = fs::metadata(&plan.output)?.len();
             }
         }
 
@@ -603,6 +617,19 @@ impl Engine for MediaEngine {
         )?;
         let audio_bps = audio.as_ref().map(|a| a.bitrate_bps).unwrap_or(0);
 
+        // Apple's hardware encoder, when asked for and present. Not for a VMAF
+        // search (its CRF bounds are the software encoder's).
+        let hw_quality = opts
+            .quality
+            .default_hw_quality(opts.video_codec)
+            .filter(|_| {
+                opts.hardware && opts.target_vmaf.is_none() && hardware_encoding_available()
+            });
+        let hardware = hw_quality.is_some();
+        // The quality value for this encoder: CRF, or VideoToolbox's `-q:v`.
+        let quality_value =
+            hw_quality.unwrap_or_else(|| opts.quality.default_crf(opts.video_codec));
+
         let (video, expected_bytes) = if let Some(tb) = target {
             let vbps = budget::video_bitrate_bps(tb, duration, audio_bps)
                 .filter(|&b| b >= budget::ABSOLUTE_MIN_VIDEO_BPS)
@@ -621,13 +648,14 @@ impl Engine for MediaEngine {
                     preset: opts.quality,
                     // A size target is for sending: make it play everywhere.
                     to_sdr: info.hdr,
+                    hardware,
                 },
                 Some(predicted),
             )
         } else {
             // Quality mode: CRF, no hard size guarantee. The CRF default is
             // codec-aware; a `--vmaf` target refines it via a search in `run`.
-            let crf = opts.quality.default_crf(opts.video_codec);
+            let crf = quality_value;
             let height = match opts.resolution {
                 ResolutionOpt::Height(h) => clamp_height(h, src_height),
                 ResolutionOpt::Auto => None,
@@ -640,8 +668,12 @@ impl Engine for MediaEngine {
                     height,
                     fps: pick_fps(opts.fps, info.fps),
                     preset: opts.quality,
-                    // Quality mode keeps HDR (and 10-bit) as shot.
-                    to_sdr: None,
+                    // Quality mode keeps HDR (and 10-bit) as shot — except
+                    // Apple's H.264, which is 8-bit only: SDR it is.
+                    to_sdr: info
+                        .hdr
+                        .filter(|_| hardware && opts.video_codec == VideoCodec::H264),
+                    hardware,
                 },
                 None,
             )
@@ -650,7 +682,9 @@ impl Engine for MediaEngine {
         // Two-pass is how a bitrate budget is actually hit; the caller can force
         // it off (faster, looser) but can't force it on in CRF mode, where there
         // is no budget for a first pass to measure.
-        let two_pass = video.bitrate_bps.is_some() && opts.two_pass.unwrap_or(true);
+        // Apple's encoder has no two-pass: it hits a budget in one (with the
+        // overshoot retry in `run`).
+        let two_pass = video.bitrate_bps.is_some() && opts.two_pass.unwrap_or(true) && !hardware;
         let summary = build_summary(&video, audio.as_ref(), two_pass);
 
         Ok(EncodePlan {
@@ -677,7 +711,7 @@ impl Engine for MediaEngine {
             },
             // A size target is its own guarantee; quality mode gets the guard.
             guard_larger: target.is_none() && !opts.allow_larger,
-            ceiling_crf: target.map(|_| opts.quality.default_crf(opts.video_codec)),
+            ceiling_crf: target.map(|_| quality_value),
         })
     }
 
@@ -696,7 +730,23 @@ fn placeholder_video_spec() -> VideoSpec {
         fps: None,
         preset: crate::options::QualityPreset::Balanced,
         to_sdr: None,
+        hardware: false,
     }
+}
+
+/// Whether this Mac can encode with Apple's hardware (VideoToolbox) with a
+/// constant-quality target: Apple Silicon and an ffmpeg with the encoders.
+/// Asked once per process (it spawns `ffmpeg -encoders`).
+pub fn hardware_encoding_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        // VideoToolbox's constant quality (`-q:v`) is Apple Silicon only.
+        cfg!(all(target_os = "macos", target_arch = "aarch64"))
+            && deepshrink_ffmpeg::locate().is_ok_and(|t| {
+                deepshrink_ffmpeg::has_encoder(&t.ffmpeg, "h264_videotoolbox")
+                    && deepshrink_ffmpeg::has_encoder(&t.ffmpeg, "hevc_videotoolbox")
+            })
+    })
 }
 
 /// A stream-copy remux plan for when the source already fits the target.
@@ -976,6 +1026,25 @@ fn wants_zscale(tools: &deepshrink_ffmpeg::Tools, plan: &EncodePlan) -> bool {
 
 /// Sample windows for [`predict_crf_bytes`]: three 3-second clips at 20/50/80%.
 const SAMPLE_SECS: f64 = 3.0;
+/// The shortest window for heavy video (4K, 60 fps): measured on a 60 s 4K60
+/// iPhone clip, 1.5 s windows predicted as well as 3 s (+3.3 % vs +3.8 %) in
+/// half the time; 1 s drifted to +7 %.
+const MIN_SAMPLE_SECS: f64 = 1.5;
+
+/// Sample window length: 3 s up to 1080p30, shorter as the pixel rate grows
+/// (4K60 → 1.5 s), so a preview of heavy video doesn't take a minute.
+fn sample_secs(plan: &EncodePlan) -> f64 {
+    const REFERENCE: f64 = 1920.0 * 1080.0 * 30.0;
+    let (w, h) = match (plan.source_width, plan.source_height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => (w as f64, h as f64),
+        _ => return SAMPLE_SECS,
+    };
+    let fps = plan
+        .source_fps
+        .filter(|f| f.is_finite() && *f > 0.0)
+        .unwrap_or(30.0);
+    (SAMPLE_SECS * REFERENCE / (w * h * fps)).clamp(MIN_SAMPLE_SECS, SAMPLE_SECS)
+}
 /// Each sample starts on a keyframe, so samples over-predict by ~8–10% (a
 /// 30 s phone clip: 20.4 MB predicted vs 18.7 MB real) — scale that back.
 const SAMPLE_BIAS: f64 = 0.92;
@@ -995,11 +1064,12 @@ fn predict_crf_bytes(
     }
     // Long clips: three 3 s windows. Short ones (< 12 s): the whole clip once —
     // exact, and still cheap — so no keyframe bias to correct either.
-    let (windows, bias): (Vec<(f64, f64)>, f64) = if duration >= SAMPLE_SECS * 4.0 {
+    let win = sample_secs(plan);
+    let (windows, bias): (Vec<(f64, f64)>, f64) = if duration >= win * 4.0 {
         (
             [0.2, 0.5, 0.8]
                 .iter()
-                .map(|at| ((duration * at - SAMPLE_SECS / 2.0).max(0.0), SAMPLE_SECS))
+                .map(|at| ((duration * at - win / 2.0).max(0.0), win))
                 .collect(),
             SAMPLE_BIAS,
         )
@@ -1165,9 +1235,14 @@ fn output_with_ext(input: &Path, ext: &str) -> PathBuf {
 }
 
 fn build_summary(video: &VideoSpec, audio: Option<&AudioSpec>, two_pass: bool) -> String {
-    let mut parts = vec![video.codec.label().to_string()];
+    let mut parts = vec![if video.hardware {
+        format!("{} (Apple hardware)", video.codec.label())
+    } else {
+        video.codec.label().to_string()
+    }];
     match (video.bitrate_bps, video.crf) {
         (Some(bps), _) => parts.push(format!("up to {} kbps video", bps / 1000)),
+        (_, Some(q)) if video.hardware => parts.push(format!("quality {q}")),
         (_, Some(crf)) => parts.push(format!("CRF {crf}")),
         _ => {}
     }
@@ -1185,7 +1260,16 @@ fn build_summary(video: &VideoSpec, audio: Option<&AudioSpec>, two_pass: bool) -
     if video.to_sdr.is_some() {
         parts.push("HDR → SDR".to_string());
     }
-    parts.push(if two_pass { "two-pass" } else { "CRF" }.to_string());
+    parts.push(
+        if two_pass {
+            "two-pass"
+        } else if video.hardware {
+            "one pass"
+        } else {
+            "CRF"
+        }
+        .to_string(),
+    );
     parts.join(" · ")
 }
 
@@ -1282,6 +1366,12 @@ fn resolve_encoder(
     plan: &EncodePlan,
 ) -> Result<&'static str, EngineError> {
     let codec = plan.spec.video.codec;
+    // Apple's hardware encoder (availability was checked when planning).
+    if plan.spec.video.hardware && !plan.spec.passthrough && !plan.spec.audio_only {
+        if let Some(hw) = codec.hardware_encoder() {
+            return Ok(hw);
+        }
+    }
     let primary = codec.encoder();
     let Some(fallback) = codec.fallback_encoder() else {
         return Ok(primary);
@@ -1393,9 +1483,13 @@ fn build_pass_args(
     }
     // The speed knob is per-encoder: `-preset medium` is meaningless (and fatal)
     // to SVT-AV1, which wants a number.
-    let (speed_flag, speed_value) = s.video.preset.speed_flags(encoder);
-    push!(speed_flag);
-    push!(speed_value);
+    // VideoToolbox has no speed preset — it's fast by construction.
+    let videotoolbox = encoder.ends_with("_videotoolbox");
+    if !videotoolbox {
+        let (speed_flag, speed_value) = s.video.preset.speed_flags(encoder);
+        push!(speed_flag);
+        push!(speed_value);
+    }
     if let Some(tag) = s.video.codec.mp4_tag() {
         push!("-tag:v");
         push!(tag);
@@ -1430,7 +1524,8 @@ fn build_pass_args(
             }
         }
         (_, Some(crf)) => {
-            push!("-crf");
+            // Apple's encoder takes a constant quality (1–100), not a CRF.
+            push!(if videotoolbox { "-q:v" } else { "-crf" });
             push!(crf.to_string());
         }
         _ => {}
@@ -1971,6 +2066,59 @@ mod tests {
         assert!(quality.ceiling_crf.is_none() && ceiling_plan(&quality).is_none());
         let fits = engine.plan(&info, &opts_target(300_000_000)).unwrap();
         assert!(fits.spec.passthrough && ceiling_plan(&fits).is_none());
+    }
+
+    #[test]
+    fn heavy_video_samples_shorter_windows() {
+        let engine = MediaEngine::new();
+        let mut info = video_info(120.0, 500_000_000, 1920, 1080, true);
+        info.fps = Some(30.0);
+        let plan = engine.plan(&info, &ShrinkOpts::default()).unwrap();
+        assert_eq!(sample_secs(&plan), 3.0);
+        info = video_info(120.0, 500_000_000, 3840, 2160, true);
+        info.fps = Some(60.0);
+        let plan = engine.plan(&info, &ShrinkOpts::default()).unwrap();
+        assert_eq!(sample_secs(&plan), MIN_SAMPLE_SECS);
+    }
+
+    #[test]
+    fn apple_hardware_uses_quality_one_pass_and_no_preset() {
+        let engine = MediaEngine::new();
+        let info = video_info(60.0, 200_000_000, 1920, 1080, true);
+        let mut plan = engine.plan(&info, &ShrinkOpts::default()).unwrap();
+        // As a plan would be on an Apple Silicon Mac with `hardware: true`.
+        plan.spec.video.hardware = true;
+        plan.spec.video.crf = QualityPreset::Balanced.default_hw_quality(VideoCodec::H264);
+        let args: Vec<String> =
+            build_pass_args(&plan, PassKind::Single, "", "h264_videotoolbox", false)
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+        assert!(args.windows(2).any(|w| w == ["-c:v", "h264_videotoolbox"]));
+        assert!(args.windows(2).any(|w| w == ["-q:v", "66"]), "{args:?}");
+        assert!(
+            !args.iter().any(|a| a == "-crf" || a == "-preset"),
+            "{args:?}"
+        );
+        let mut hw = plan.clone();
+        hw.spec.passthrough = false;
+        assert_eq!(
+            resolve_encoder(
+                &deepshrink_ffmpeg::Tools {
+                    ffmpeg: "ffmpeg".into(),
+                    ffprobe: "ffprobe".into(),
+                    cancel: Default::default(),
+                },
+                &hw
+            )
+            .unwrap(),
+            "h264_videotoolbox"
+        );
+        // AV1 has no Apple encoder: the quality map says so.
+        assert_eq!(
+            QualityPreset::Balanced.default_hw_quality(VideoCodec::Av1),
+            None
+        );
     }
 
     fn iphone_info() -> MediaInfo {

@@ -530,6 +530,7 @@ fn build_opts(cli: &Cli, goal: SizeGoal) -> Result<ShrinkOpts, AppError> {
         dpi: None,
         allow_larger: cli.allow_larger,
         keep_metadata: !cli.strip_metadata,
+        hardware: cli.fast,
     })
 }
 

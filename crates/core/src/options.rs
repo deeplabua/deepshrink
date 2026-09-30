@@ -26,6 +26,15 @@ impl VideoCodec {
 
     /// A second encoder to try when [`encoder`](Self::encoder) is missing from
     /// the local ffmpeg build. Only AV1 has one — x264/x265 are universal.
+    /// Apple's hardware encoder (VideoToolbox) for this codec, if it has one.
+    pub fn hardware_encoder(self) -> Option<&'static str> {
+        match self {
+            VideoCodec::H264 => Some("h264_videotoolbox"),
+            VideoCodec::H265 => Some("hevc_videotoolbox"),
+            VideoCodec::Av1 => None,
+        }
+    }
+
     pub fn fallback_encoder(self) -> Option<&'static str> {
         match self {
             VideoCodec::Av1 => Some("libaom-av1"),
@@ -177,6 +186,26 @@ impl QualityPreset {
     /// for comparable quality, and AV1 higher still, so the numbers are
     /// codec-specific. These defaults aim for roughly VMAF ~93 (visually
     /// near-transparent) on typical content.
+    /// VideoToolbox constant quality (`-q:v`, 1–100) giving about the same
+    /// VMAF as [`Self::default_crf`] with the software encoder — calibrated on
+    /// a 4K iPhone clip. Apple H.264 lands near x264's size; Apple HEVC is ~50 %
+    /// larger than x265 at that quality. `None`: no hardware encoder (AV1).
+    pub fn default_hw_quality(self, codec: VideoCodec) -> Option<u8> {
+        match codec {
+            VideoCodec::H264 => Some(match self {
+                QualityPreset::Fast => 55,
+                QualityPreset::Balanced => 66,
+                QualityPreset::Max => 72,
+            }),
+            VideoCodec::H265 => Some(match self {
+                QualityPreset::Fast => 52,
+                QualityPreset::Balanced => 57,
+                QualityPreset::Max => 69,
+            }),
+            VideoCodec::Av1 => None,
+        }
+    }
+
     pub fn default_crf(self, codec: VideoCodec) -> u8 {
         match codec {
             VideoCodec::H264 => match self {

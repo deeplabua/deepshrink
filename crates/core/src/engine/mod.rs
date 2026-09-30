@@ -139,6 +139,11 @@ pub struct ShrinkOpts {
     /// QuickTime keys included) and its modification time. On by default;
     /// `false` strips metadata from the output.
     pub keep_metadata: bool,
+    /// Encode video with Apple's hardware encoder (VideoToolbox) when this Mac
+    /// has it — ~3–5× faster and a fraction of the memory, for a larger file
+    /// (see [`QualityPreset::default_hw_quality`]). Off by default; ignored for
+    /// AV1 and where [`media::hardware_encoding_available`] is false.
+    pub hardware: bool,
 }
 
 impl Default for ShrinkOpts {
@@ -160,6 +165,7 @@ impl Default for ShrinkOpts {
             dpi: None,
             allow_larger: false,
             keep_metadata: true,
+            hardware: false,
         }
     }
 }
@@ -177,6 +183,9 @@ pub struct VideoSpec {
     /// Frame-rate cap; `None` keeps the source rate.
     pub fps: Option<u32>,
     pub preset: QualityPreset,
+    /// Encode with Apple's hardware encoder: `crf` then carries its `-q:v`
+    /// quality (1–100, higher = better) and two-pass doesn't apply.
+    pub hardware: bool,
     /// Tone-map this HDR source to 8-bit SDR (BT.709): set for size targets /
     /// platform presets, where the file has to play everywhere — 10-bit H.264
     /// (High 10) and HDR aren't decoded by most phones and browsers.
