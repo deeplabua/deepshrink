@@ -347,7 +347,10 @@ fn process_one(
             );
         }
         let kept = plan.spec.passthrough
-            || (plan.guard_larger && plan.expected_bytes.is_some_and(|b| b >= info.size_bytes));
+            || (plan.guard_larger
+                && plan
+                    .expected_bytes
+                    .is_some_and(|b| deepshrink_core::not_worth_it(b, info.size_bytes)));
         return Ok(FileResult::DryRun {
             original: info.size_bytes,
             expected: if kept {

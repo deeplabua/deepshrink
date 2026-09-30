@@ -289,6 +289,18 @@ pub enum EngineError {
     Io(#[from] std::io::Error),
 }
 
+/// A quality-mode re-encode has to save at least this share of the source to
+/// be worth it; below that the original is kept. A minutes-long 4K encode for
+/// a 1 % saving isn't a compression — just a generation of quality loss.
+pub const MIN_SAVING: f64 = 0.05;
+
+/// Whether a result of `expected` bytes isn't worth producing for a `source`
+/// of `source` bytes (saves less than [`MIN_SAVING`]). The guard, dry runs and
+/// UI previews all ask this, so a preview and the run agree.
+pub fn not_worth_it(expected: u64, source: u64) -> bool {
+    source > 0 && expected as f64 >= source as f64 * (1.0 - MIN_SAVING)
+}
+
 impl EngineError {
     /// The run was stopped through its cancel token (see
     /// [`media::MediaEngine::with_cancel`]) — not a failure to report.
@@ -310,4 +322,19 @@ pub trait Engine {
     fn plan(&self, info: &MediaInfo, opts: &ShrinkOpts) -> Result<EncodePlan, EngineError>;
     /// Execute the plan (side effect: run the encoder binary).
     fn run(&self, plan: &EncodePlan) -> Result<Outcome, EngineError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_re_encode_must_save_at_least_five_percent() {
+        assert!(not_worth_it(100, 100));
+        assert!(not_worth_it(120, 100));
+        assert!(not_worth_it(96, 100)); // −4 %: keep the original
+        assert!(!not_worth_it(95, 1_000)); // −90 %
+        assert!(!not_worth_it(949, 1_000)); // −5.1 %
+        assert!(!not_worth_it(0, 0)); // unknown source: no call
+    }
 }

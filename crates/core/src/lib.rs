@@ -16,5 +16,6 @@ pub use engine::{
     media::MediaEngine, AudioSpec, CaptureMeta, EncodePlan, EncodeSpec, Engine, EngineError, Hdr,
     MediaInfo, Outcome, ShrinkOpts, SizeGoal, VideoSpec,
 };
+pub use engine::{not_worth_it, MIN_SAVING};
 pub use options::{AudioChoice, AudioCodec, FpsOpt, QualityPreset, ResolutionOpt, VideoCodec};
 pub use size::{parse_percent, parse_size, preset, Preset, SizeError};

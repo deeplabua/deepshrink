@@ -113,8 +113,8 @@ impl MediaEngine {
 
         // "Never make it bigger" in quality mode (sizes are guaranteed by the
         // target path already): predict a CRF video from samples and skip the
-        // encode when it clearly won't shrink; after any guarded encode, keep
-        // the original if the result isn't smaller after all.
+        // encode when it won't save at least `MIN_SAVING`; after any guarded
+        // encode, keep the original if the result doesn't after all.
         let source = if plan.guard_larger && !plan.spec.passthrough {
             fs::metadata(&plan.input).map(|m| m.len()).unwrap_or(0)
         } else {
@@ -126,7 +126,7 @@ impl MediaEngine {
             && plan.spec.video.crf.is_some()
         {
             if let Some(predicted) = predict_crf_bytes(&tools, plan, encoder, zscale) {
-                if predicted >= source {
+                if super::not_worth_it(predicted, source) {
                     return self.keep_original(&tools, plan, on_progress);
                 }
             }
@@ -148,7 +148,7 @@ impl MediaEngine {
             Some(o) => o,
             None => self.run_plain(&tools, plan, encoder, zscale, on_progress)?,
         };
-        if source > 0 && outcome.final_bytes >= source {
+        if source > 0 && super::not_worth_it(outcome.final_bytes, source) {
             let _ = fs::remove_file(&outcome.output);
             return self.keep_original(&tools, plan, on_progress);
         }

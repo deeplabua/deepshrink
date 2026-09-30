@@ -143,7 +143,7 @@ target (predicted from short sample encodes), that's what you get — a 2-second
 Discord doesn't become 8 MB just because it could.
 
 **Never bigger.** Without a size target (quality mode) DeepShrink won't hand back a file
-that isn't smaller: re-encoding an already-compact file only loses quality. Video is
+that isn't at least 5% smaller: re-encoding an already-compact file only loses quality. Video is
 predicted from three short sample encodes first (an already-optimal clip is recognised in
 seconds, not after a full encode); audio isn't re-encoded at or above its own bitrate; and
 every result is checked at the end. Such files are kept as-is (`already compact`). Pass
