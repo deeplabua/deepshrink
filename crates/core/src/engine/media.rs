@@ -16,7 +16,7 @@ use super::{
 };
 use crate::budget;
 use crate::detect::{detect_kind, MediaKind};
-use crate::options::{AudioChoice, AudioCodec, FpsOpt, ResolutionOpt};
+use crate::options::{AudioChoice, AudioCodec, FpsOpt, QualityPreset, ResolutionOpt};
 
 /// Audio bitrate ladder (bits/s, descending) tried when keeping a track under
 /// a tight size budget.
@@ -57,7 +57,32 @@ impl MediaEngine {
             }
         }
 
+        // "Never make it bigger" in quality mode (sizes are guaranteed by the
+        // target path already): predict a CRF video from samples and skip the
+        // encode when it clearly won't shrink; after any guarded encode, keep
+        // the original if the result isn't smaller after all.
+        let source = if plan.guard_larger && !plan.spec.passthrough {
+            fs::metadata(&plan.input).map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        if source > 0
+            && plan.target_vmaf.is_none()
+            && !plan.spec.audio_only
+            && plan.spec.video.crf.is_some()
+        {
+            if let Some(predicted) = predict_crf_bytes(&tools, plan, encoder) {
+                if predicted >= source {
+                    return self.keep_original(&tools, plan, on_progress);
+                }
+            }
+        }
+
         let mut outcome = self.run_plain(&tools, plan, encoder, on_progress)?;
+        if source > 0 && outcome.final_bytes >= source {
+            let _ = fs::remove_file(&outcome.output);
+            return self.keep_original(&tools, plan, on_progress);
+        }
 
         // Size-targeted video with `--vmaf`: encode to budget, then report the
         // VMAF actually achieved (best effort — a failed measurement is silent).
@@ -123,6 +148,32 @@ impl MediaEngine {
             output: plan.output.clone(),
             final_bytes: size,
             vmaf: None,
+            already_compact: false,
+        })
+    }
+
+    /// The guard fired: deliver the source as-is (a byte copy, in its own
+    /// container/extension) instead of a re-encode that would not be smaller.
+    fn keep_original(
+        &self,
+        tools: &deepshrink_ffmpeg::Tools,
+        plan: &EncodePlan,
+        on_progress: &mut dyn FnMut(PassKind, f64),
+    ) -> Result<Outcome, EngineError> {
+        let _ = tools; // no ffmpeg needed: the source is delivered byte-for-byte
+        let output = match plan.input.extension() {
+            Some(ext) => plan.output.with_extension(ext),
+            None => plan.output.clone(),
+        };
+        // A plain copy, not a remux: "kept as-is" must mean identical bytes (a
+        // +faststart remux came out a few KB larger than the source).
+        fs::copy(&plan.input, &output)?;
+        on_progress(PassKind::Single, 1.0);
+        Ok(Outcome {
+            final_bytes: fs::metadata(&output)?.len(),
+            output,
+            vmaf: None,
+            already_compact: true,
         })
     }
 
@@ -155,6 +206,7 @@ impl MediaEngine {
             output: plan.output.clone(),
             final_bytes: size,
             vmaf: None,
+            already_compact: true,
         })
     }
 
@@ -221,6 +273,7 @@ impl MediaEngine {
             output: plan.output.clone(),
             final_bytes: size,
             vmaf: Some(chosen_vmaf),
+            already_compact: false,
         })
     }
 
@@ -289,8 +342,26 @@ impl MediaEngine {
                 (bps, Some(predicted))
             }
             None => {
-                // Quality mode: a transparent-ish default, lower for speech.
-                let bps = if mono { 96_000 } else { 160_000 };
+                // Quality mode: per tier, codec and channel count.
+                let bps = quality_audio_bps(opts.quality, codec, mono);
+                // Never re-encode lossy audio at (nearly) its own bitrate or
+                // above: that is only generation loss, often a bigger file (a
+                // 64 kbps MP3 audiobook → 160 kbps AAC doubled it). Keep it.
+                if !opts.allow_larger && already_compact_audio(bps, info) {
+                    let src_ext = info
+                        .path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("audio");
+                    let output = opts
+                        .output
+                        .clone()
+                        .unwrap_or_else(|| output_with_ext(&info.path, src_ext));
+                    let mut plan = passthrough_plan(info, output, info.size_bytes, false);
+                    plan.summary =
+                        "stream copy (already compact — a re-encode would not be smaller)".into();
+                    return Ok(plan);
+                }
                 (bps, None)
             }
         };
@@ -328,6 +399,8 @@ impl MediaEngine {
                 audio_only: true,
                 dpi: None,
             },
+            // A size target is its own guarantee; quality mode gets the guard.
+            guard_larger: target.is_none() && !opts.allow_larger,
         })
     }
 }
@@ -478,6 +551,8 @@ impl Engine for MediaEngine {
                 audio_only: false,
                 dpi: None,
             },
+            // A size target is its own guarantee; quality mode gets the guard.
+            guard_larger: target.is_none() && !opts.allow_larger,
         })
     }
 
@@ -521,7 +596,90 @@ fn passthrough_plan(info: &MediaInfo, output: PathBuf, target: u64, faststart: b
             audio_only: false,
             dpi: None,
         },
+        guard_larger: false,
     }
+}
+
+/// Quality-mode audio bitrate by tier, codec and channel count (mono = half).
+/// Opus needs the least for the same quality, MP3 the most.
+fn quality_audio_bps(quality: QualityPreset, codec: AudioCodec, mono: bool) -> u64 {
+    let stereo = match (codec, quality) {
+        (AudioCodec::Opus, QualityPreset::Fast) => 64_000,
+        (AudioCodec::Opus, QualityPreset::Balanced) => 96_000,
+        (AudioCodec::Opus, QualityPreset::Max) => 128_000,
+        (AudioCodec::Mp3, QualityPreset::Fast) => 128_000,
+        (AudioCodec::Mp3, QualityPreset::Balanced) => 160_000,
+        (AudioCodec::Mp3, QualityPreset::Max) => 256_000,
+        (AudioCodec::Aac, QualityPreset::Fast) => 96_000,
+        (AudioCodec::Aac, QualityPreset::Balanced) => 128_000,
+        (AudioCodec::Aac, QualityPreset::Max) => 192_000,
+    };
+    if mono {
+        stereo / 2
+    } else {
+        stereo
+    }
+}
+
+/// A pure-audio source whose own bitrate is at or under ~110% of what we'd
+/// encode at: a re-encode can't meaningfully shrink it. The source rate comes
+/// from size / duration (embedded cover art only raises it — the safe side).
+fn already_compact_audio(bps: u64, info: &MediaInfo) -> bool {
+    if info.duration_sec <= 0.0 || info.size_bytes == 0 {
+        return false;
+    }
+    let source_bps = info.size_bytes as f64 * 8.0 / info.duration_sec;
+    bps as f64 >= source_bps * 0.9
+}
+
+/// Sample windows for [`predict_crf_bytes`]: three 3-second clips at 20/50/80%.
+const SAMPLE_SECS: f64 = 3.0;
+/// Each sample starts on a keyframe, so samples over-predict by ~8–10% (a
+/// 30 s phone clip: 20.4 MB predicted vs 18.7 MB real) — scale that back.
+const SAMPLE_BIAS: f64 = 0.92;
+
+/// Predict a CRF video encode's final size from three short sample encodes
+/// (same encoder, CRF, preset, scaling, fps; audio at the planned bitrate).
+/// `None` for short clips (a full encode is cheap; the post-encode check
+/// covers them) or when a sample fails.
+fn predict_crf_bytes(
+    tools: &deepshrink_ffmpeg::Tools,
+    plan: &EncodePlan,
+    encoder: &str,
+) -> Option<u64> {
+    let duration = plan.source_duration_sec;
+    if !duration.is_finite() || duration < SAMPLE_SECS * 4.0 {
+        return None;
+    }
+    let mut sample = plan.clone();
+    sample.spec.audio = None;
+    sample.spec.faststart = false;
+    let mut video_bytes = 0u64;
+    let mut sampled = 0.0;
+    for (i, at) in [0.2, 0.5, 0.8].iter().enumerate() {
+        let start = (duration * at - SAMPLE_SECS / 2.0).max(0.0);
+        sample.output =
+            std::env::temp_dir().join(format!("deepshrink-sample-{}-{i}.mp4", std::process::id()));
+        let mut args = build_pass_args(&sample, PassKind::Single, "", encoder);
+        let at_input = args.iter().position(|a| a == "-i")?;
+        args.splice(
+            at_input..at_input,
+            [
+                OsString::from("-ss"),
+                OsString::from(format!("{start:.2}")),
+                OsString::from("-t"),
+                OsString::from(format!("{SAMPLE_SECS}")),
+            ],
+        );
+        let ran = deepshrink_ffmpeg::run_pass(&tools.ffmpeg, &args, SAMPLE_SECS, &mut |_| {});
+        let bytes = fs::metadata(&sample.output).map(|m| m.len()).ok();
+        let _ = fs::remove_file(&sample.output);
+        video_bytes += bytes.filter(|_| ran.is_ok())?;
+        sampled += SAMPLE_SECS;
+    }
+    let video_bps = video_bytes as f64 * 8.0 / sampled * SAMPLE_BIAS;
+    let audio_bps = plan.spec.audio.as_ref().map(|a| a.bitrate_bps).unwrap_or(0) as f64;
+    Some(((video_bps + audio_bps) * duration / 8.0 * (1.0 + budget::CONTAINER_OVERHEAD)) as u64)
 }
 
 /// Human-readable summary for a pure-audio plan, e.g.
@@ -1114,6 +1272,70 @@ mod tests {
             audio_codec: Some("pcm_s16le".into()),
             audio_channels: Some(channels),
         }
+    }
+
+    #[test]
+    fn quality_audio_bitrate_follows_tier_codec_and_channels() {
+        use QualityPreset::*;
+        assert_eq!(quality_audio_bps(Balanced, AudioCodec::Aac, false), 128_000);
+        assert_eq!(quality_audio_bps(Balanced, AudioCodec::Aac, true), 64_000);
+        assert_eq!(quality_audio_bps(Fast, AudioCodec::Opus, true), 32_000);
+        assert_eq!(quality_audio_bps(Max, AudioCodec::Mp3, false), 256_000);
+        // Every tier is strictly smaller → larger, per codec.
+        for c in [AudioCodec::Aac, AudioCodec::Opus, AudioCodec::Mp3] {
+            let t: Vec<_> = [Fast, Balanced, Max]
+                .map(|q| quality_audio_bps(q, c, false))
+                .into();
+            assert!(t[0] < t[1] && t[1] < t[2], "{c:?}: {t:?}");
+        }
+    }
+
+    #[test]
+    fn a_compact_audiobook_is_kept_in_quality_mode() {
+        // 1 h mono at 64 kbps (the review case): balanced AAC mono is 64 kbps too.
+        let mut info = audio_info(3600.0, 64_000 / 8 * 3600, 1);
+        info.path = PathBuf::from("/tmp/book.mp3");
+        let plan = MediaEngine::new()
+            .plan(&info, &ShrinkOpts::default())
+            .unwrap();
+        assert!(plan.spec.passthrough, "{}", plan.summary);
+        assert!(plan.output.to_string_lossy().ends_with(".mp3"));
+        assert!(plan.summary.contains("already compact"));
+
+        // A genuinely smaller recipe still encodes (Opus fast mono = 32 kbps).
+        let smaller = ShrinkOpts {
+            audio_codec: AudioCodec::Opus,
+            quality: QualityPreset::Fast,
+            ..ShrinkOpts::default()
+        };
+        let plan = MediaEngine::new().plan(&info, &smaller).unwrap();
+        assert!(!plan.spec.passthrough);
+        assert_eq!(plan.spec.audio.as_ref().unwrap().bitrate_bps, 32_000);
+        assert!(
+            plan.guard_larger,
+            "quality mode keeps the post-encode check"
+        );
+
+        // Opting out re-encodes at the tier bitrate.
+        let allow = ShrinkOpts {
+            allow_larger: true,
+            ..ShrinkOpts::default()
+        };
+        let plan = MediaEngine::new().plan(&info, &allow).unwrap();
+        assert!(!plan.spec.passthrough && !plan.guard_larger);
+    }
+
+    #[test]
+    fn the_guard_is_for_quality_mode_only() {
+        let info = video_info(60.0, 50_000_000, 1920, 1080, true);
+        let quality = MediaEngine::new()
+            .plan(&info, &ShrinkOpts::default())
+            .unwrap();
+        assert!(quality.guard_larger);
+        let target = MediaEngine::new()
+            .plan(&info, &opts_target(10_000_000))
+            .unwrap();
+        assert!(!target.guard_larger, "a size target is its own guarantee");
     }
 
     #[test]

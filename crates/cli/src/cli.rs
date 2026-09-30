@@ -90,6 +90,11 @@ pub struct Cli {
     #[arg(long)]
     pub recursive: bool,
 
+    /// Allow a result that isn't smaller than the source (quality mode). By
+    /// default an already-compact file is kept as-is instead of re-encoded.
+    #[arg(long = "allow-larger")]
+    pub allow_larger: bool,
+
     /// Show the plan (bitrate, expected size) without encoding.
     #[arg(long = "dry-run")]
     pub dry_run: bool,

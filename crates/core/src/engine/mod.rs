@@ -84,6 +84,11 @@ pub struct ShrinkOpts {
     /// document engines act on it — the media engine ignores it, as pixels in a
     /// video have no physical size.
     pub dpi: Option<u32>,
+    /// Allow a quality-mode result that is not smaller than the source.
+    /// Off by default: re-encoding an already-compact lossy file only loses
+    /// quality, so the engine keeps the original instead (sample-predicted for
+    /// video, bitrate-compared for audio, and checked after every encode).
+    pub allow_larger: bool,
 }
 
 impl Default for ShrinkOpts {
@@ -103,6 +108,7 @@ impl Default for ShrinkOpts {
             output: None,
             two_pass: None,
             dpi: None,
+            allow_larger: false,
         }
     }
 }
@@ -186,6 +192,9 @@ pub struct EncodePlan {
     pub source_height: Option<u32>,
     pub source_fps: Option<f64>,
     pub spec: EncodeSpec,
+    /// Keep the original instead of producing a result that isn't smaller
+    /// (see [`ShrinkOpts::allow_larger`]). Engines without a guard set `false`.
+    pub guard_larger: bool,
 }
 
 /// The execution result — the result of [`Engine::run`].
@@ -195,6 +204,9 @@ pub struct Outcome {
     pub final_bytes: u64,
     /// Measured VMAF of the result vs the source, if a measurement was taken.
     pub vmaf: Option<f64>,
+    /// The output is the source copied as-is (stream copy): it already fit the
+    /// target, or re-encoding it would not have made it smaller.
+    pub already_compact: bool,
 }
 
 /// Engine errors.

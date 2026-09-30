@@ -345,15 +345,21 @@ fn process_one(
     let outcome = encode(engine, &plan, cli).inspect_err(|_| {
         let _ = std::fs::remove_file(&temp);
     })?;
-    std::fs::rename(&temp, &final_dest).map_err(|e| {
-        let _ = std::fs::remove_file(&temp);
+    // A kept original is a stream copy into the source's own container, so the
+    // produced file (and the final name) may carry the source's extension.
+    let produced = outcome.output.clone();
+    let final_dest = match produced.extension() {
+        Some(ext) if produced != temp => final_dest.with_extension(ext),
+        _ => final_dest,
+    };
+    std::fs::rename(&produced, &final_dest).map_err(|e| {
+        let _ = std::fs::remove_file(&produced);
         AppError::Runtime(format!("failed to move output into place: {e}"))
     })?;
 
     let outcome = Outcome {
         output: final_dest,
-        final_bytes: outcome.final_bytes,
-        vmaf: outcome.vmaf,
+        ..outcome
     };
 
     if cli.json {
@@ -472,6 +478,7 @@ fn build_opts(cli: &Cli, goal: SizeGoal) -> Result<ShrinkOpts, AppError> {
         // — both fields exist for the engines the desktop layer plugs in.
         two_pass: None,
         dpi: None,
+        allow_larger: cli.allow_larger,
     })
 }
 
@@ -587,6 +594,12 @@ fn print_outcome(info: &MediaInfo, outcome: &Outcome) {
         }),
         vmaf,
     );
+    if outcome.already_compact {
+        println!(
+            "    {}\n",
+            "already compact — kept as-is".if_supports_color(Stdout, |t| t.dimmed().to_string())
+        );
+    }
 }
 
 fn print_summary(stats: &BatchStats, failed: usize) {
@@ -635,6 +648,7 @@ fn print_json_result(info: &MediaInfo, outcome: &Outcome) {
         "original_bytes": info.size_bytes,
         "final_bytes": outcome.final_bytes,
         "vmaf": outcome.vmaf,
+        "already_compact": outcome.already_compact,
         "dry_run": false,
     });
     println!("{value}");
