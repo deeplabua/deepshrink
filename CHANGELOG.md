@@ -3,7 +3,7 @@
 All notable changes to DeepShrink. The release pipeline uses the matching
 `## [x.y.z]` section as the GitHub release notes.
 
-## [Unreleased]
+## [0.3.11] - 2026-10-01
 
 ### Library (`deepshrink-core`)
 
