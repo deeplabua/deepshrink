@@ -1020,7 +1020,7 @@ mod tests {
             ..Default::default()
         };
         let plan = MediaEngine::new().plan(&info, &opts).unwrap();
-        assert_eq!(plan.target_bytes, Some(8_000_000));
+        assert_eq!(plan.target_bytes, Some(10_000_000));
     }
 
     #[test]

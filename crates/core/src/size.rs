@@ -86,9 +86,13 @@ pub struct Preset {
 /// Look up a preset by name. Limit values are TO BE VERIFIED AT RELEASE: platforms change them.
 pub fn preset(name: &str) -> Option<Preset> {
     let (name, limit_bytes) = match name.trim().to_ascii_lowercase().as_str() {
-        "discord" => ("discord", Some(8_000_000)),
+        "discord" => ("discord", Some(10_000_000)),
         "discord-nitro" => ("discord-nitro", Some(500_000_000)),
         "email" => ("email", Some(20_000_000)),
+        // iMessage: Apple doesn't publish a limit; ~100 MB is what goes
+        // through as a video (larger is sent as a link) — to verify.
+        "imessage" => ("imessage", Some(100_000_000)),
+        "slack" => ("slack", Some(1_000_000_000)),
         "telegram" => ("telegram", Some(2_000_000_000)),
         "whatsapp" => ("whatsapp", Some(16_000_000)),
         "web" => ("web", None),
@@ -171,8 +175,8 @@ mod tests {
 
     #[test]
     fn known_presets_resolve() {
-        assert_eq!(preset("discord").unwrap().limit_bytes, Some(8_000_000));
-        assert_eq!(preset("DISCORD").unwrap().limit_bytes, Some(8_000_000));
+        assert_eq!(preset("discord").unwrap().limit_bytes, Some(10_000_000));
+        assert_eq!(preset("DISCORD").unwrap().limit_bytes, Some(10_000_000));
         assert_eq!(
             preset("discord-nitro").unwrap().limit_bytes,
             Some(500_000_000)
@@ -180,6 +184,8 @@ mod tests {
         assert_eq!(preset("email").unwrap().limit_bytes, Some(20_000_000));
         assert_eq!(preset("telegram").unwrap().limit_bytes, Some(2_000_000_000));
         assert_eq!(preset("whatsapp").unwrap().limit_bytes, Some(16_000_000));
+        assert_eq!(preset("imessage").unwrap().limit_bytes, Some(100_000_000));
+        assert_eq!(preset("slack").unwrap().limit_bytes, Some(1_000_000_000));
         // web — optimization without a hard limit.
         assert_eq!(preset("web").unwrap().limit_bytes, None);
     }

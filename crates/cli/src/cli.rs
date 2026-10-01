@@ -31,7 +31,7 @@ pub struct Cli {
     #[arg(long, value_name = "PCT")]
     pub reduce: Option<String>,
 
-    /// Platform preset that sets the target: discord, email, telegram, whatsapp, web, ...
+    /// Platform preset that sets the target: discord, email, imessage, slack, telegram, whatsapp, web, ...
     #[arg(long = "for", value_name = "PRESET")]
     pub for_preset: Option<String>,
 

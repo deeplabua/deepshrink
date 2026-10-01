@@ -3,6 +3,18 @@
 All notable changes to DeepShrink. The release pipeline uses the matching
 `## [x.y.z]` section as the GitHub release notes.
 
+## [0.3.14] - 2026-10-01
+
+### Changed
+
+- **`--for discord` now targets 10 MB** (Discord's current free upload limit;
+  was 8 MB). Pass `--target 8MB` for the old size.
+
+### Added
+
+- Presets **`slack`** (1 GB) and **`imessage`** (100 MB — Apple doesn't
+  publish a limit; larger videos go as links).
+
 ## [0.3.13] - 2026-10-01
 
 ### Changed

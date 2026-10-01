@@ -8,7 +8,7 @@
 [![Stars](https://img.shields.io/github/stars/deeplabua/deepshrink?style=flat&logo=github&label=Star)](https://github.com/deeplabua/deepshrink/stargazers)
 
 `deepshrink` compresses a video or audio file to a target size in a single command.
-Need a clip under Discord's 8 MB limit, an email's 25 MB cap, or a Telegram / WhatsApp
+Need a clip under Discord's 10 MB limit, an email's 25 MB cap, or a Telegram / WhatsApp
 size? Point DeepShrink at the file — it does the bitrate math, runs a two-pass encode,
 and lands **under the limit**. Locally, without uploading to anyone's server, and
 without watermarks.
@@ -24,7 +24,7 @@ A thin, fast Rust layer over ffmpeg.
 
 ## Why
 
-Everyone hits upload limits — Discord (8 / 25 / 50 MB), email (~25 MB), Telegram,
+Everyone hits upload limits — Discord (10 / 50 / 500 MB), email (~25 MB), Telegram,
 WhatsApp, bug trackers, CI artifacts. The usual options are web converters (upload your
 file to a stranger's server, watermarks, queues), HandBrake (powerful, but hitting
 *exactly* N MB is manual trial and error), or hand-written ffmpeg commands (recompute the
@@ -53,7 +53,7 @@ platform's package manager).
 
 ## Usage
 
-Fit a video under Discord's 8 MB limit:
+Fit a video under Discord's 10 MB limit:
 
 ```sh
 deepshrink gameplay.mp4 --for discord
@@ -123,9 +123,11 @@ you pass `--overwrite`.
 
 | Preset | Limit |
 | --- | --- |
-| `discord` | 8 MB |
+| `discord` | 10 MB |
 | `discord-nitro` | 500 MB |
 | `email` | 20 MB |
+| `imessage` | 100 MB |
+| `slack` | 1 GB |
 | `telegram` | 2 GB |
 | `whatsapp` | 16 MB |
 
@@ -144,7 +146,7 @@ On Windows, Linux and Intel Macs (and for AV1) it prints a note and encodes in s
 
 **A target is a ceiling, not a quota.** When the quality preset alone lands well under the
 target (predicted from short sample encodes), that's what you get — a 2-second clip for
-Discord doesn't become 8 MB just because it could.
+Discord doesn't become 10 MB just because it could.
 
 **Never bigger.** Without a size target (quality mode) DeepShrink won't hand back a file
 that isn't at least 5% smaller: re-encoding an already-compact file only loses quality. Video is
