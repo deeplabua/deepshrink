@@ -548,31 +548,6 @@ fn wants_zscale(tools: &deepshrink_ffmpeg::Tools, plan: &EncodePlan) -> bool {
         && deepshrink_ffmpeg::has_filter(&tools.ffmpeg, "zscale")
 }
 
-/// Sample windows for [`predict_crf_bytes`]: three 3-second clips at 20/50/80%.
-const SAMPLE_SECS: f64 = 3.0;
-/// The shortest window for heavy video (4K, 60 fps): measured on a 60 s 4K60
-/// iPhone clip, 1.5 s windows predicted as well as 3 s (+3.3 % vs +3.8 %) in
-/// half the time; 1 s drifted to +7 %.
-const MIN_SAMPLE_SECS: f64 = 1.5;
-
-/// Sample window length: 3 s up to 1080p30, shorter as the pixel rate grows
-/// (4K60 → 1.5 s), so a preview of heavy video doesn't take a minute.
-fn sample_secs(plan: &EncodePlan) -> f64 {
-    const REFERENCE: f64 = 1920.0 * 1080.0 * 30.0;
-    let (w, h) = match (plan.source_width, plan.source_height) {
-        (Some(w), Some(h)) if w > 0 && h > 0 => (w as f64, h as f64),
-        _ => return SAMPLE_SECS,
-    };
-    let fps = plan
-        .source_fps
-        .filter(|f| f.is_finite() && *f > 0.0)
-        .unwrap_or(30.0);
-    (SAMPLE_SECS * REFERENCE / (w * h * fps)).clamp(MIN_SAMPLE_SECS, SAMPLE_SECS)
-}
-/// Each sample starts on a keyframe, so samples over-predict by ~8–10% (a
-/// 30 s phone clip: 20.4 MB predicted vs 18.7 MB real) — scale that back.
-const SAMPLE_BIAS: f64 = 0.92;
-
 /// Predict a CRF video encode's final size from short sample encodes (same
 /// encoder, CRF, preset, scaling, fps; audio at the planned bitrate): three
 /// 3 s windows, or the whole clip when it's under 12 s. `None` if a sample fails.
@@ -586,20 +561,7 @@ fn predict_crf_bytes(
     if !duration.is_finite() || duration <= 0.0 {
         return None;
     }
-    // Long clips: three 3 s windows. Short ones (< 12 s): the whole clip once —
-    // exact, and still cheap — so no keyframe bias to correct either.
-    let win = sample_secs(plan);
-    let (windows, bias): (Vec<(f64, f64)>, f64) = if duration >= win * 4.0 {
-        (
-            [0.2, 0.5, 0.8]
-                .iter()
-                .map(|at| ((duration * at - win / 2.0).max(0.0), win))
-                .collect(),
-            SAMPLE_BIAS,
-        )
-    } else {
-        (vec![(0.0, duration)], 1.0)
-    };
+    let (windows, bias) = sample_windows(plan);
     let mut sample = plan.clone();
     sample.spec.audio = None;
     sample.spec.faststart = false;
@@ -625,9 +587,7 @@ fn predict_crf_bytes(
         video_bytes += bytes.filter(|_| ran.is_ok())?;
         sampled += len;
     }
-    let video_bps = video_bytes as f64 * 8.0 / sampled * bias;
-    let audio_bps = plan.spec.audio.as_ref().map(|a| a.bitrate_bps).unwrap_or(0) as f64;
-    Some(((video_bps + audio_bps) * duration / 8.0 * (1.0 + budget::CONTAINER_OVERHEAD)) as u64)
+    Some(predicted_bytes(plan, video_bytes, sampled, bias))
 }
 
 /// The `-vf` chain: downscale first (fewer pixels to convert), then HDR → SDR.

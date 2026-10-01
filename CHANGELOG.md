@@ -3,6 +3,16 @@
 All notable changes to DeepShrink. The release pipeline uses the matching
 `## [x.y.z]` section as the GitHub release notes.
 
+## [0.3.12] - 2026-10-01
+
+### Library (`deepshrink-core`)
+
+- **Size prediction from samples is pure** — `engine::plan::sample_windows`
+  (which windows to sample-encode, and the keyframe bias) and
+  `engine::plan::predicted_bytes` (the final size from the samples), so an
+  encoder other than ffmpeg (the iOS app's VideoToolbox) predicts the same way.
+  Behaviour unchanged.
+
 ## [0.3.11] - 2026-10-01
 
 ### Library (`deepshrink-core`)

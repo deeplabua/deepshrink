@@ -688,6 +688,64 @@ pub fn corrected_bitrate(vbps: u64, target: u64, size: u64) -> Option<u64> {
     (corrected >= budget::ABSOLUTE_MIN_VIDEO_BPS).then_some(corrected)
 }
 
+/// Sample window length for predicting a CRF encode (see [`sample_windows`]).
+pub const SAMPLE_SECS: f64 = 3.0;
+/// The shortest window for heavy video (4K, 60 fps): measured on a 60 s 4K60
+/// iPhone clip, 1.5 s windows predicted as well as 3 s (+3.3 % vs +3.8 %) in
+/// half the time; 1 s drifted to +7 %.
+pub const MIN_SAMPLE_SECS: f64 = 1.5;
+
+/// Sample window length: 3 s up to 1080p30, shorter as the pixel rate grows
+/// (4K60 → 1.5 s), so a preview of heavy video doesn't take a minute.
+pub fn sample_secs(plan: &EncodePlan) -> f64 {
+    const REFERENCE: f64 = 1920.0 * 1080.0 * 30.0;
+    let (w, h) = match (plan.source_width, plan.source_height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => (w as f64, h as f64),
+        _ => return SAMPLE_SECS,
+    };
+    let fps = plan
+        .source_fps
+        .filter(|f| f.is_finite() && *f > 0.0)
+        .unwrap_or(30.0);
+    (SAMPLE_SECS * REFERENCE / (w * h * fps)).clamp(MIN_SAMPLE_SECS, SAMPLE_SECS)
+}
+/// Each sample starts on a keyframe, so samples over-predict by ~8–10% (a
+/// 30 s phone clip: 20.4 MB predicted vs 18.7 MB real) — scale that back.
+pub const SAMPLE_BIAS: f64 = 0.92;
+
+/// The windows `(start, length)` in seconds to sample-encode for predicting a
+/// quality-mode (CRF) encode's size, and the bias to apply to their bit rate.
+/// Long clips: three windows at 20/50/80 %; short ones (under four windows):
+/// the whole clip once — exact, so no keyframe bias to correct.
+pub fn sample_windows(plan: &EncodePlan) -> (Vec<(f64, f64)>, f64) {
+    let duration = plan.source_duration_sec;
+    let win = sample_secs(plan);
+    if duration >= win * 4.0 {
+        (
+            [0.2, 0.5, 0.8]
+                .iter()
+                .map(|at| ((duration * at - win / 2.0).max(0.0), win))
+                .collect(),
+            SAMPLE_BIAS,
+        )
+    } else {
+        (vec![(0.0, duration)], 1.0)
+    }
+}
+
+/// The predicted final size of `plan` from its sample encodes: `video_bytes`
+/// of video-only output over `sampled_secs`, scaled by `bias`, plus the planned
+/// audio and container overhead.
+pub fn predicted_bytes(plan: &EncodePlan, video_bytes: u64, sampled_secs: f64, bias: f64) -> u64 {
+    let duration = plan.source_duration_sec;
+    if sampled_secs <= 0.0 {
+        return 0;
+    }
+    let video_bps = video_bytes as f64 * 8.0 / sampled_secs * bias;
+    let audio_bps = plan.spec.audio.as_ref().map(|a| a.bitrate_bps).unwrap_or(0) as f64;
+    ((video_bps + audio_bps) * duration / 8.0 * (1.0 + budget::CONTAINER_OVERHEAD)) as u64
+}
+
 #[cfg(test)]
 mod tests {
     //! The planning logic on its own — no ffmpeg (runs with
@@ -778,6 +836,25 @@ mod tests {
         let c = ceiling_plan(&p).unwrap();
         assert_eq!(c.spec.video.bitrate_bps, None);
         assert!(c.spec.video.crf.is_some() && !c.spec.two_pass);
+    }
+
+    #[test]
+    fn long_clips_sample_three_windows_short_ones_the_whole_clip() {
+        let opts = ShrinkOpts::default();
+        let long = plan(&video(1920, 1080, 60.0, 200_000_000), &opts, false).unwrap();
+        let (w, bias) = sample_windows(&long);
+        assert_eq!(w.len(), 3);
+        assert_eq!(w[1], (28.5, 3.0));
+        assert_eq!(bias, SAMPLE_BIAS);
+        // 1 MB of video over 9 s, 128 kbps audio, 60 s, 1 % overhead.
+        let bytes = predicted_bytes(&long, 1_000_000, 9.0, 1.0);
+        assert_eq!(
+            bytes,
+            ((8_000_000.0 / 9.0 + 128_000.0) * 60.0 / 8.0 * (1.0 + budget::CONTAINER_OVERHEAD))
+                as u64
+        );
+        let short = plan(&video(1920, 1080, 8.0, 20_000_000), &opts, false).unwrap();
+        assert_eq!(sample_windows(&short), (vec![(0.0, 8.0)], 1.0));
     }
 
     #[test]
