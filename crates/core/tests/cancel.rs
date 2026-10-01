@@ -1,3 +1,5 @@
+#![cfg(feature = "ffmpeg")]
+
 //! Stopping a running encode: `MediaEngine::with_cancel` kills ffmpeg, removes
 //! the half-written output and returns a "cancelled" error — nothing keeps
 //! encoding in the background. Needs ffmpeg/ffprobe; skips without them.

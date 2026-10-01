@@ -3,6 +3,20 @@
 All notable changes to DeepShrink. The release pipeline uses the matching
 `## [x.y.z]` section as the GitHub release notes.
 
+## [Unreleased]
+
+### Library (`deepshrink-core`)
+
+- **The ffmpeg engine is an optional feature** (`ffmpeg`, on by default — the
+  CLI and existing users see no change). With `default-features = false` the
+  crate is the pure planning logic only: size budgets, presets, quality tiers,
+  Apple-encoder calibration, the "worth it" threshold and
+  `engine::plan::plan(info, opts, hw_available)` — e.g. for an iOS app that
+  encodes with AVFoundation.
+- Planning moved out of `engine::media` into `engine::plan` (behaviour
+  unchanged); `plan::ceiling_plan`, `plan::corrected_bitrate`, `plan::to_utc`
+  are public.
+
 ## [0.3.10] - 2026-09-30
 
 ### Fixed

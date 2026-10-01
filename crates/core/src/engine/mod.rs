@@ -7,7 +7,9 @@
 //! Principle: [`Engine::plan`] is a pure, testable function (bitrate math);
 //! side effects are isolated in [`Engine::run`].
 
+#[cfg(feature = "ffmpeg")]
 pub mod media;
+pub mod plan;
 
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -142,7 +144,7 @@ pub struct ShrinkOpts {
     /// Encode video with Apple's hardware encoder (VideoToolbox) when this Mac
     /// has it — ~3–5× faster and a fraction of the memory, for a larger file
     /// (see [`QualityPreset::default_hw_quality`]). Off by default; ignored for
-    /// AV1 and where [`media::hardware_encoding_available`] is false.
+    /// AV1 and where `media::hardware_encoding_available` is false.
     pub hardware: bool,
 }
 
@@ -295,6 +297,7 @@ pub enum EngineError {
     Infeasible,
     #[error("not yet implemented: {0}")]
     NotImplemented(&'static str),
+    #[cfg(feature = "ffmpeg")]
     #[error(transparent)]
     Ffmpeg(#[from] deepshrink_ffmpeg::FfmpegError),
     #[error(transparent)]
@@ -315,16 +318,19 @@ pub fn not_worth_it(expected: u64, source: u64) -> bool {
 
 impl EngineError {
     /// The run was stopped through its cancel token (see
-    /// [`media::MediaEngine::with_cancel`]) — not a failure to report.
+    /// `MediaEngine::with_cancel`) — not a failure to report.
     pub fn is_cancelled(&self) -> bool {
-        matches!(
+        #[cfg(feature = "ffmpeg")]
+        return matches!(
             self,
             Self::Ffmpeg(deepshrink_ffmpeg::FfmpegError::Cancelled)
-        )
+        );
+        #[cfg(not(feature = "ffmpeg"))]
+        false
     }
 }
 
-/// The compression engine contract. The one v0.1 implementation is [`media::MediaEngine`].
+/// The compression engine contract. The one v0.1 implementation is `media::MediaEngine`.
 pub trait Engine {
     /// Whether this engine handles the given file.
     fn supports(&self, input: &Path) -> bool;

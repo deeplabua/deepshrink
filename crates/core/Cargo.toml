@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["ffmpeg"]
+# The ffmpeg-backed media engine (probe / run / estimate). Off, the crate is the
+# pure planning logic only — what an iOS app links (it encodes with AVFoundation).
+ffmpeg = ["dep:deepshrink-ffmpeg"]
+
 [dependencies]
 thiserror.workspace = true
-deepshrink-ffmpeg.workspace = true
+deepshrink-ffmpeg = { workspace = true, optional = true }

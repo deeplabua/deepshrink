@@ -1,3 +1,5 @@
+#![cfg(feature = "ffmpeg")]
+
 //! `MediaEngine::estimate` against a real encode: the preview a UI shows must be
 //! close to what `run` produces. Needs ffmpeg/ffprobe; skips without them.
 
