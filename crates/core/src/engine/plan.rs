@@ -712,11 +712,17 @@ pub fn sample_secs(plan: &EncodePlan) -> f64 {
 /// Each sample starts on a keyframe, so samples over-predict by ~8–10% (a
 /// 30 s phone clip: 20.4 MB predicted vs 18.7 MB real) — scale that back.
 pub const SAMPLE_BIAS: f64 = 0.92;
+/// The same for Apple's hardware encoder, which over-predicts far less:
+/// measured on 6 clips × H.264/HEVC (4K60 HDR, 4K30, 720p; the iOS app's
+/// VideoToolbox path, identical on Mac and iPhone), unbiased samples ran 0.88–
+/// 1.12 of the real size, mean 1.03; 0.97 puts 11 of 12 within ±10 % (0.92: 8).
+pub const SAMPLE_BIAS_HW: f64 = 0.97;
 
 /// The windows `(start, length)` in seconds to sample-encode for predicting a
 /// quality-mode (CRF) encode's size, and the bias to apply to their bit rate.
 /// Long clips: three windows at 20/50/80 %; short ones (under four windows):
-/// the whole clip once — exact, so no keyframe bias to correct.
+/// the whole clip once — exact, so no keyframe bias to correct. The bias is
+/// the encoder's ([`SAMPLE_BIAS`], or [`SAMPLE_BIAS_HW`] for Apple's).
 pub fn sample_windows(plan: &EncodePlan) -> (Vec<(f64, f64)>, f64) {
     let duration = plan.source_duration_sec;
     let win = sample_secs(plan);
@@ -726,7 +732,11 @@ pub fn sample_windows(plan: &EncodePlan) -> (Vec<(f64, f64)>, f64) {
                 .iter()
                 .map(|at| ((duration * at - win / 2.0).max(0.0), win))
                 .collect(),
-            SAMPLE_BIAS,
+            if plan.spec.video.hardware {
+                SAMPLE_BIAS_HW
+            } else {
+                SAMPLE_BIAS
+            },
         )
     } else {
         (vec![(0.0, duration)], 1.0)
@@ -855,6 +865,13 @@ mod tests {
         );
         let short = plan(&video(1920, 1080, 8.0, 20_000_000), &opts, false).unwrap();
         assert_eq!(sample_windows(&short), (vec![(0.0, 8.0)], 1.0));
+        // Apple's encoder over-predicts less.
+        let hw_opts = ShrinkOpts {
+            hardware: true,
+            ..ShrinkOpts::default()
+        };
+        let hw = plan(&video(1920, 1080, 60.0, 200_000_000), &hw_opts, true).unwrap();
+        assert_eq!(sample_windows(&hw).1, SAMPLE_BIAS_HW);
     }
 
     #[test]

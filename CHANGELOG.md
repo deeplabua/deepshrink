@@ -3,6 +3,19 @@
 All notable changes to DeepShrink. The release pipeline uses the matching
 `## [x.y.z]` section as the GitHub release notes.
 
+## [0.3.13] - 2026-10-01
+
+### Changed
+
+- **More accurate previews with `--fast`.** A quality-mode size estimate for
+  Apple's hardware encoder no longer applies the software encoder's
+  keyframe correction (it under-predicted by ~6 % on average): measured on
+  6 clips × H.264/HEVC, 11 of 12 previews now land within ±10 %.
+
+### Library (`deepshrink-core`)
+
+- `engine::plan::SAMPLE_BIAS_HW`; `sample_windows` picks the bias by encoder.
+
 ## [0.3.12] - 2026-10-01
 
 ### Library (`deepshrink-core`)
