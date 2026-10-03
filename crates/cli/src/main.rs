@@ -420,6 +420,14 @@ fn process_one(
         Some(ext) if produced != temp => final_dest.with_extension(ext),
         _ => final_dest,
     };
+    // That name wasn't checked above (only the planned one was): same rule.
+    if produced != temp && final_dest.exists() && !cli.overwrite {
+        let _ = std::fs::remove_file(&produced);
+        return Err(AppError::InvalidArgs(format!(
+            "output already exists: {} (use --overwrite to replace it)",
+            final_dest.display()
+        )));
+    }
     std::fs::rename(&produced, &final_dest).map_err(|e| {
         let _ = std::fs::remove_file(&produced);
         AppError::Runtime(format!("failed to move output into place: {e}"))

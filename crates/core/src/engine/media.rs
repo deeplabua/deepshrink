@@ -267,8 +267,21 @@ impl MediaEngine {
             None => plan.output.clone(),
         };
         // A plain copy, not a remux: "kept as-is" must mean identical bytes (a
-        // +faststart remux came out a few KB larger than the source).
-        fs::copy(&plan.input, &output)?;
+        // +faststart remux came out a few KB larger than the source). The
+        // name differs from the planned output (the source's extension), so a
+        // caller that checked the planned name for collisions never saw this
+        // one: create it fresh and fail rather than overwrite a file there.
+        {
+            let mut src = fs::File::open(&plan.input)?;
+            let mut dst = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&output)?;
+            std::io::copy(&mut src, &mut dst)?;
+        }
+        if let Ok(meta) = fs::metadata(&plan.input) {
+            let _ = fs::set_permissions(&output, meta.permissions());
+        }
         on_progress(PassKind::Single, 1.0);
         Ok(Outcome {
             final_bytes: fs::metadata(&output)?.len(),

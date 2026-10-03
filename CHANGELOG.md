@@ -3,6 +3,22 @@
 All notable changes to DeepShrink. The release pipeline uses the matching
 `## [x.y.z]` section as the GitHub release notes.
 
+## [0.3.15] - 2026-10-03
+
+### Fixed
+
+- **A kept-as-is result never overwrites another file.** When a re-encode
+  wouldn't be smaller, the original is delivered under the output name with
+  its own extension (`book.mp3` → `book.shrink.mp3`) — that name skipped the
+  "output already exists" check, so an existing `book.shrink.mp3` was
+  replaced even without `--overwrite`. It's now refused like any other
+  collision; `--overwrite` replaces it as before.
+
+### Library (`deepshrink-core`)
+
+- The kept-as-is copy is created fresh (`create_new`): the engine fails with an
+  I/O error instead of overwriting a file at that path.
+
 ## [0.3.14] - 2026-10-01
 
 ### Changed

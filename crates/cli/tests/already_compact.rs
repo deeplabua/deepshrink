@@ -133,3 +133,53 @@ fn a_low_bitrate_mp3_is_kept_not_upsampled() {
     assert!(v["final_bytes"].as_u64().unwrap() < before, "{stdout}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn a_kept_copy_never_overwrites_a_file_of_that_name() {
+    if !have("ffmpeg") || !have("ffprobe") {
+        eprintln!("skipping: ffmpeg/ffprobe not found in PATH");
+        return;
+    }
+    let d = dir("clobber");
+    let src = d.join("book.mp3");
+    ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=300:duration=20",
+            "-ac",
+            "1",
+            "-b:a",
+            "48k",
+        ],
+        &src,
+    );
+    // The planned output is book.shrink.m4a (free); a kept copy would be
+    // book.shrink.mp3 — and a file by that name is already there.
+    let mine = d.join("book.shrink.mp3");
+    std::fs::write(&mine, b"someone else's file").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_deepshrink"))
+        .arg(&src)
+        .output()
+        .expect("run deepshrink");
+    assert!(!out.status.success(), "must refuse, not overwrite");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("already exists"));
+    assert_eq!(std::fs::read(&mine).unwrap(), b"someone else's file");
+    assert!(!d.join("book.shrink.m4a").exists());
+    // No temp file left behind.
+    let leftovers: Vec<_> = std::fs::read_dir(&d)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    // --overwrite replaces it, as for any other output.
+    let stdout = shrink(&src, &["--json", "--overwrite"]);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("json");
+    assert_eq!(v["already_compact"], true, "{stdout}");
+    assert_ne!(std::fs::read(&mine).unwrap(), b"someone else's file");
+    let _ = std::fs::remove_dir_all(&d);
+}
