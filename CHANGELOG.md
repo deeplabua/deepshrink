@@ -3,6 +3,13 @@
 All notable changes to DeepShrink. The release pipeline uses the matching
 `## [x.y.z]` section as the GitHub release notes.
 
+## [Unreleased]
+
+### Added
+
+- Preset **`github`** (10 MB — the limit for videos in issues, pull requests and
+  comments on free plans).
+
 ## [0.3.15] - 2026-10-03
 
 ### Fixed

@@ -89,6 +89,9 @@ pub fn preset(name: &str) -> Option<Preset> {
         "discord" => ("discord", Some(10_000_000)),
         "discord-nitro" => ("discord-nitro", Some(500_000_000)),
         "email" => ("email", Some(20_000_000)),
+        // GitHub: videos attached to an issue, a pull request or a comment — 10 MB on
+        // free plans (100 MB on paid ones) — to verify.
+        "github" => ("github", Some(10_000_000)),
         // iMessage: Apple doesn't publish a limit; ~100 MB is what goes
         // through as a video (larger is sent as a link) — to verify.
         "imessage" => ("imessage", Some(100_000_000)),
@@ -186,6 +189,7 @@ mod tests {
         assert_eq!(preset("whatsapp").unwrap().limit_bytes, Some(16_000_000));
         assert_eq!(preset("imessage").unwrap().limit_bytes, Some(100_000_000));
         assert_eq!(preset("slack").unwrap().limit_bytes, Some(1_000_000_000));
+        assert_eq!(preset("github").unwrap().limit_bytes, Some(10_000_000));
         // web — optimization without a hard limit.
         assert_eq!(preset("web").unwrap().limit_bytes, None);
     }

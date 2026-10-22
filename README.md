@@ -126,6 +126,7 @@ you pass `--overwrite`.
 | `discord` | 10 MB |
 | `discord-nitro` | 500 MB |
 | `email` | 20 MB |
+| `github` | 10 MB |
 | `imessage` | 100 MB |
 | `slack` | 1 GB |
 | `telegram` | 2 GB |
