@@ -1,3 +1,5 @@
+<p align="center"><img src=".github/DeepShrink-CLI-256.png" width="128" height="128" alt="DeepShrink CLI icon"></p>
+
 # DeepShrink
 
 > Fit any video or audio under a size limit — one command, local, no watermarks.
