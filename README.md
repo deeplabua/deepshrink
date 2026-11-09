@@ -17,6 +17,10 @@ without watermarks.
 
 A thin, fast Rust layer over ffmpeg.
 
+> **Prefer a window?** [DeepShrink for Mac](https://deeplab.tools/products/deepshrink/) does the same
+> for video, audio, images, PDF and Office files: drop a file, pick a size. Get it on the
+> [Mac App Store](https://apps.apple.com/app/apple-store/id6818459194?pt=128971666&ct=github&mt=8).
+
 > **Status:** released and actively developed (v0.3). Handles **video and audio**, with
 > target-size and VMAF-quality modes, H.264/H.265/AV1, batch processing, and a
 > "never bigger" guard for already-compact files. Install via Homebrew or crates.io.
