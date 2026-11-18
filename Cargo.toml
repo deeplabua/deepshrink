@@ -53,6 +53,10 @@ install-updater = false
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 
+# GitHub retired the macos-14 image dist 0.32 picks for Apple silicon (Nov 2026).
+[workspace.metadata.dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
+
 # ffmpeg is a runtime dependency; have the Homebrew formula pull it in.
 # `stage = ["run"]` is what emits `depends_on "ffmpeg"` in the formula — the
 # default stage is build-only, which would NOT install ffmpeg for users.
