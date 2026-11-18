@@ -5,10 +5,19 @@ All notable changes to DeepShrink. The release pipeline uses the matching
 
 ## [Unreleased]
 
+## [0.3.16] - 2026-11-18
+
 ### Added
 
 - Preset **`github`** (10 MB — the limit for videos in issues, pull requests and
   comments on free plans).
+
+### Changed
+
+- **`email` is 14 MB** (was 20 MB). An attachment travels base64-encoded, about
+  a third bigger, so a 20 MB file was ~27 MB in the message — over Outlook.com's
+  and iCloud Mail's 20 MB and Gmail's 25 MB (Gmail turned it into a Drive link).
+  14 MB is ~19 MB encoded: it fits all three.
 
 ## [0.3.15] - 2026-10-03
 

@@ -10,7 +10,7 @@
 [![Stars](https://img.shields.io/github/stars/deeplabua/deepshrink?style=flat&logo=github&label=Star)](https://github.com/deeplabua/deepshrink/stargazers)
 
 `deepshrink` compresses a video or audio file to a target size in a single command.
-Need a clip under Discord's 10 MB limit, an email's 25 MB cap, or a Telegram / WhatsApp
+Need a clip under Discord's 10 MB limit, an email attachment that fits Gmail and Outlook, or a Telegram / WhatsApp
 size? Point DeepShrink at the file — it does the bitrate math, runs a two-pass encode,
 and lands **under the limit**. Locally, without uploading to anyone's server, and
 without watermarks.
@@ -30,7 +30,7 @@ A thin, fast Rust layer over ffmpeg.
 
 ## Why
 
-Everyone hits upload limits — Discord (10 / 50 / 500 MB), email (~25 MB), Telegram,
+Everyone hits upload limits — Discord (10 / 50 / 500 MB), email (20–25 MB, encoding included), Telegram,
 WhatsApp, bug trackers, CI artifacts. The usual options are web converters (upload your
 file to a stranger's server, watermarks, queues), HandBrake (powerful, but hitting
 *exactly* N MB is manual trial and error), or hand-written ffmpeg commands (recompute the
@@ -131,7 +131,7 @@ you pass `--overwrite`.
 | --- | --- |
 | `discord` | 10 MB |
 | `discord-nitro` | 500 MB |
-| `email` | 20 MB |
+| `email` | 14 MB (~19 MB once encoded: fits Gmail, Outlook, iCloud Mail) |
 | `github` | 10 MB |
 | `imessage` | 100 MB |
 | `slack` | 1 GB |

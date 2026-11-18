@@ -88,7 +88,9 @@ pub fn preset(name: &str) -> Option<Preset> {
     let (name, limit_bytes) = match name.trim().to_ascii_lowercase().as_str() {
         "discord" => ("discord", Some(10_000_000)),
         "discord-nitro" => ("discord-nitro", Some(500_000_000)),
-        "email" => ("email", Some(20_000_000)),
+        // Email: attachments travel base64-encoded (+~37%), so a 14 MB file is ~19 MB in
+        // the message — under Outlook.com's and iCloud Mail's 20 MB and Gmail's 25 MB.
+        "email" => ("email", Some(14_000_000)),
         // GitHub: videos attached to an issue, a pull request or a comment — 10 MB on
         // free plans (100 MB on paid ones) — to verify.
         "github" => ("github", Some(10_000_000)),
@@ -184,7 +186,7 @@ mod tests {
             preset("discord-nitro").unwrap().limit_bytes,
             Some(500_000_000)
         );
-        assert_eq!(preset("email").unwrap().limit_bytes, Some(20_000_000));
+        assert_eq!(preset("email").unwrap().limit_bytes, Some(14_000_000));
         assert_eq!(preset("telegram").unwrap().limit_bytes, Some(2_000_000_000));
         assert_eq!(preset("whatsapp").unwrap().limit_bytes, Some(16_000_000));
         assert_eq!(preset("imessage").unwrap().limit_bytes, Some(100_000_000));
